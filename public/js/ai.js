@@ -9,32 +9,63 @@
 const AI = (() => {
   let cache = null;
 
-  async function api(path, options) {
-    const res = await fetch(path, {
-      headers: { 'Content-Type': 'application/json' },
-      ...options,
-    });
-    const text = await res.text();
-    let data = {};
-    try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text.slice(0, 300) }; }
-    return { status: res.status, data };
+  const TIMEOUTS = {
+    config: 15000,     // чтение/запись настроек
+    ping: 60000,       // проверка ключа: модель отвечает одним словом
+    ai: 150000,        // генерация плана/темы/отчёта — это долгий запрос
+  };
+
+  /**
+   * Запрос к своему бэкенду с жёстким таймаутом.
+   * Без него кнопка могла «тупить»: запрос висел, а пользователь жал повторно.
+   */
+  async function api(path, options = {}) {
+    const timeout = options.timeout || TIMEOUTS.ai;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const res = await fetch(path, {
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        ...options,
+      });
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text.slice(0, 300) }; }
+      return { status: res.status, data };
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        return {
+          status: 0,
+          data: {
+            error: `Запрос прерван по таймауту (${Math.round(timeout / 1000)} с). ИИ не ответил вовремя — попробуй ещё раз или выбери модель быстрее.`,
+            code: 'TIMEOUT',
+          },
+        };
+      }
+      return { status: 0, data: { error: `Нет связи с сервером приложения: ${err.message}`, code: 'OFFLINE' } };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function getConfig(force) {
     if (cache && !force) return cache;
-    const { data } = await api('/api/config');
+    const { data } = await api('/api/config', { timeout: TIMEOUTS.config });
     cache = data;
     return cache;
   }
 
   async function saveConfig(body) {
-    const { data } = await api('/api/config', { method: 'POST', body: JSON.stringify(body) });
+    const { data } = await api('/api/config', {
+      method: 'POST', body: JSON.stringify(body), timeout: TIMEOUTS.config,
+    });
     cache = null;
     return data;
   }
 
   async function ping() {
-    const { data } = await api('/api/ping', { method: 'POST', body: '{}' });
+    const { data } = await api('/api/ping', { method: 'POST', body: '{}', timeout: TIMEOUTS.ping });
     return data;
   }
 
@@ -47,6 +78,7 @@ const AI = (() => {
     const { status, data } = await api('/api/ai', {
       method: 'POST',
       body: JSON.stringify({ system, user, json: !!json, temperature, maxTokens }),
+      timeout: TIMEOUTS.ai,
     });
     if (status !== 200) {
       const err = new Error(data.error || `Ошибка API (${status})`);
@@ -108,7 +140,7 @@ const AI = (() => {
     return parsed;
   }
 
-  return { getConfig, saveConfig, ping, isConfigured, chat, json, extractJson };
+  return { getConfig, saveConfig, ping, isConfigured, chat, json, extractJson, TIMEOUTS };
 })();
 
 /* ==========================================================================
@@ -123,19 +155,21 @@ const TEACHER_RULES = `
 3. Любой термин объясняй сразу в скобках простыми словами.
 4. Приводи конкретные примеры из быта или практики ученика; избегай абстракций.
 5. Не осуждай за ошибки: ошибка — это шаг к пониманию. Хвали за конкретику, а не «молодец».
-6. Пиши по-русски, дружелюбно, без воды и без обращения «уважаемый».
+6. Пиши по-русски, дружелюбно, без воды и без обращения «уважаемый». Если знаешь имя ученика — иногда обращайся по имени.
 7. Строго соблюдай структуру, которую просят.
 `.trim();
 
 function profileText(p) {
   if (!p) return 'профиль не указан';
+  const name = String(p.studentName || '').trim();
+  const namePart = name && name !== 'Ученик' ? `имя ученика: ${name}; ` : '';
   const role = p.role === 'school' ? 'школьник'
     : p.role === 'student' ? 'студент'
     : p.role === 'adult' ? 'взрослый, учится для себя'
     : 'учащийся';
   const grade = p.role === 'school' ? `${p.grade || '?'} класс`
     : p.role === 'student' ? `${p.course || '?'} курс` : 'вне школы';
-  return [
+  return namePart + [
     `роль: ${role} (${grade})`,
     p.age ? `возраст: ${p.age} лет` : '',
     p.hours ? `готов заниматься: ${p.hours}` : '',

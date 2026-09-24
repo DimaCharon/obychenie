@@ -12,6 +12,7 @@ const Store = (() => {
   function blank() {
     return {
       version: 1,
+      user: { name: '', avatar: '🐸', createdAt: new Date().toISOString() },
       courses: {},
       activeCourseId: null,
       xpByDay: {},
@@ -20,6 +21,8 @@ const Store = (() => {
       minutes: 0,
     };
   }
+
+  const AVATARS = ['🐸', '🐼', '🦉', '🦊', '🐧', '🐨', '🐯', '🦁', '🐙', '🦄', '🐢', '🐳'];
 
   function load() {
     try {
@@ -40,6 +43,33 @@ const Store = (() => {
   /* ------------------------------------------------------------- запросы */
 
   function getState() { return state; }
+
+  /* ---------------------------------------------------------- профиль */
+
+  function user() {
+    if (!state.user || typeof state.user !== 'object') {
+      state.user = { name: '', avatar: '🐸', createdAt: new Date().toISOString() };
+    }
+    if (!state.user.avatar) state.user.avatar = '🐸';
+    return state.user;
+  }
+
+  function userName() {
+    const name = String(user().name || '').trim();
+    return name || 'Ученик';
+  }
+
+  function updateUser(patch) {
+    const next = { ...user(), ...patch };
+    next.name = String(next.name || '').slice(0, 40).trim();
+    state.user = next;
+    save();
+    return state.user;
+  }
+
+  function isNewUser() {
+    return !String(user().name || '').trim() && courses().length === 0;
+  }
   function courses() { return Object.values(state.courses); }
   function getCourse(id) { return state.courses[id || state.activeCourseId] || null; }
   function active() { return getCourse(state.activeCourseId); }
@@ -124,7 +154,7 @@ const Store = (() => {
       emoji: normalized.emoji,
       summary: normalized.summary,
       source: normalized.source,
-      profile,
+      profile: { studentName: userName(), ...profile },
       interview: interview || null,
       sections: normalized.sections,
       progress: {},
@@ -311,8 +341,9 @@ const Store = (() => {
   }
 
   return {
-    PASS,
+    PASS, AVATARS,
     getState, courses, getCourse, active, createCourse, updateCourse, setActive, removeCourse,
+    user, userName, updateUser, isNewUser,
     path, topicById, nextTopic, stats, starsFor, saveResult, addChat, addXp, totalXp,
     level, levelProgress, lastDays, uid, save, normalizePlan, normalizeQuestion, today,
   };

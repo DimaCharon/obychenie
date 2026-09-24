@@ -321,12 +321,17 @@ function courseMenu(course) {
   });
 }
 
+let bonusBusy = false;
+
 async function bonusOpen(course, data) {
   if (!data.allDone) { toast('Бонус откроется, когда пройдёшь все темы курса'); return; }
+  if (bonusBusy) return;
+  bonusBusy = true;
   const bodyHost = h('div', {}, loader('ИИ придумывает практическое задание…', ['Смотрю на пройденные темы…', 'Подбираю задачу под твою цель…']));
   const m = modal({ title: '🏆 Бонусное задание', wide: true, body: bodyHost, actions: [{ label: 'Закрыть', style: 'ghost' }] });
 
   const { data: task, demo } = await aiBonus(course);
+  bonusBusy = false;
   const saved = course.bonus || {};
   const done = new Set(saved.doneChecklist || []);
   const checklist = task.checklist || [];
@@ -409,6 +414,18 @@ Screens.home = () => {
     App.go(`#/new?topic=${encodeURIComponent(t)}`);
   };
 
+  const me = Store.user();
+  const named = Boolean(String(me.name || '').trim());
+
+  const profileNudge = named ? null
+    : h('div.card', { style: { borderColor: '#1d4f68', background: '#142a35' } },
+      h('div.inline', {},
+        h('span', { style: { fontSize: '26px' } }, me.avatar || '🐸'),
+        h('div', { style: { flex: '1 1 240px' } },
+          h('div', { style: { fontWeight: '900' } }, 'Давай познакомимся'),
+          h('div.muted.small', 'Укажи имя и аватар — ИИ-учитель будет обращаться к тебе по имени, а отчёты станут персональными.')),
+        h('button.btn.sm.blue', { onClick: () => editProfileDialog(() => App.render()) }, 'Заполнить профиль')));
+
   const keyBanner = (AppShell.cfg && AppShell.cfg.keySet) ? null
     : h('div.card', { style: { borderColor: '#5a4a12', background: '#241f14' } },
       h('div.inline', {},
@@ -422,12 +439,13 @@ Screens.home = () => {
     title: 'Duo-AI',
     subtitle: 'Персональный ИИ-учитель по любой теме',
     node: h('div.stack', {},
+      profileNudge,
       keyBanner,
       h('div.card', { style: { padding: '26px', background: 'linear-gradient(160deg,#20343c,#16262c)' } },
         h('div.inline', { style: { alignItems: 'center', gap: '18px' } },
-          h('div', { style: { fontSize: '62px' } }, '🐸'),
+          h('div', { style: { fontSize: '62px' } }, me.avatar || '🐸'),
           h('div', { style: { flex: '1 1 280px' } },
-            h('h1', { style: { fontSize: '26px' } }, 'Чему хочешь научиться?'),
+            h('h1', { style: { fontSize: '26px' } }, named ? `${Store.userName()}, чему учимся?` : 'Чему хочешь научиться?'),
             h('p.muted', { style: { marginTop: '6px' } }, 'Введи тему — ИИ-учитель расспросит про твой уровень, соберёт персональный план, объяснит материал, проверит тестом и покажет отчёт о прогрессе.'))),
         h('div.inline', { style: { marginTop: '18px', gap: '10px' } },
           h('div', { style: { flex: '1 1 280px' } }, input),
@@ -454,9 +472,11 @@ Screens.home = () => {
 Screens.newCourse = (params = {}) => {
   const stepTitles = ['Тема', 'Кто ты', 'О тебе', 'Твои знания', 'Уточнения ИИ'];
   let step = 0;
+  let busy = false;              // одно нажатие = один запрос, пока не придёт ответ
   let lastQuestions = null;
 
   const profile = {
+    studentName: Store.userName(),
     role: 'school', grade: '7', course: '1', age: '', hours: '', level: 3,
     known: '', unknown: '', goal: '', style: [], deadline: '', interview: null, topic: params.topic || '',
   };
@@ -563,8 +583,8 @@ Screens.newCourse = (params = {}) => {
       mount(host,
         h('p', 'ИИ-учитель задаст уточняющие вопросы, чтобы план был точнее. Можно ответить, а можно сразу собрать план.'),
         h('div.btn-row', { style: { marginTop: '12px' } },
-          h('button.btn.blue', { onClick: goInterview }, 'Получить вопросы от ИИ'),
-          h('button.btn.ghost', { onClick: () => generate(null) }, 'Пропустить и составить план')));
+          h('button.btn.blue', { onClick: goInterview, disabled: busy }, 'Получить вопросы от ИИ'),
+          h('button.btn.ghost', { onClick: () => generate(null), disabled: busy }, 'Пропустить и составить план')));
     }
 
     mount(body, host, h('div.btn-row', { style: { marginTop: '14px', justifyContent: 'space-between' } },
@@ -583,8 +603,11 @@ Screens.newCourse = (params = {}) => {
   }
 
   async function goInterview() {
+    if (busy) return;
+    busy = true;
     mount(body, loader('ИИ готовит уточняющие вопросы…', ['Читаю твой профиль…', 'Ищу, чего не хватает для плана…', 'Формулирую вопросы…']));
     const { questions } = await aiInterview(profile.topic, profile);
+    busy = false;
     lastQuestions = questions;
     const answers = {};
 
@@ -615,6 +638,8 @@ Screens.newCourse = (params = {}) => {
   }
 
   async function generate(answers) {
+    if (busy) return;
+    busy = true;
     profile.interview = answersToText(answers);
     mount(body, loader('ИИ-учитель составляет твой план…', [
       'Разбираю твой уровень…',
@@ -910,10 +935,15 @@ Screens.lesson = (params = {}) => {
     renderSteps();
   }
 
+  let mistakesBusy = false;
+
   async function workoutMistakes() {
+    if (mistakesBusy) return;
+    mistakesBusy = true;
     const host = h('div', {}, loader('ИИ разбирает твои ошибки…', ['Смотрю, где ты ошибся…', 'Ищу причину ошибки…', 'Готовлю похожие вопросы…']));
     const m = modal({ title: '🤖 Разбор ошибок', wide: true, body: host, actions: [{ label: 'Закрыть', style: 'ghost' }] });
     const { data, demo } = await aiExtra(course, topic, state.mistakes);
+    mistakesBusy = false;
     const runner = h('div');
     mount(host,
       h('p', { style: { whiteSpace: 'pre-wrap' } }, data.analysis),
@@ -1171,12 +1201,15 @@ function xpChart(days) {
         : new Date(d.day).toLocaleDateString('ru-RU', { day: 'numeric', month: 'numeric' }))))));
 }
 
-function reportCard(course, stats, aiData, reload) {
+function reportCard(course, stats, aiData, reload, isBusy) {
   const d = aiData || {};
   return h('div.card', {},
     h('div.between', {},
       h('h3', '🤖 Разбор от ИИ-учителя'),
-      h('button.btn.sm.ghost', { onClick: reload }, d.verdict ? 'Обновить' : 'Получить разбор')),
+      h('button.btn.sm.ghost', {
+        onClick: reload,
+        disabled: Boolean(isBusy && isBusy()),
+      }, d.verdict ? 'Обновить' : 'Получить разбор')),
     d.verdict
       ? h('div', { style: { marginTop: '12px' } },
         h('p', { style: { fontWeight: '700' } }, d.verdict),
@@ -1232,7 +1265,7 @@ Screens.report = (params = {}) => {
   let loadingReport = false;
 
   const renderReport = () => {
-    mount(holder, reportCard(course, stats, course.aiReport, getReport));
+    mount(holder, reportCard(course, stats, course.aiReport, getReport, () => loadingReport));
   };
 
   async function getReport() {
@@ -1308,7 +1341,8 @@ Screens.report = (params = {}) => {
           h('p.muted.small', { style: { marginTop: '12px' } },
             `${stats.doneCount} из ${stats.total} тем · ${stats.sessions} ${plural(stats.sessions, 'попытка', 'попытки', 'попыток')} теста`))),
       holder,
-      h('div.card', {}, h('h3', { style: { marginBottom: '10px' } }, 'Успеваемость по темам'), rows,
+      h('div.card', {}, h('h3', { style: { marginBottom: '10px' } }, 'Успеваемость по темам'),
+        h('div.table-wrap', {}, rows),
         h('div.tiny.muted', { style: { marginTop: '10px' } }, 'Нажми на строку, чтобы открыть отчёт по конкретной теме.')),
       h('div.card', {},
         h('h3', { style: { marginBottom: '10px' } }, 'Профиль обучения'),
@@ -1368,7 +1402,11 @@ Screens.topicReport = (params = {}) => {
           h('button.btn.sm', { onClick: getAi }, 'Получить разбор'))));
   }
 
+  let topicReportBusy = false;
+
   async function getAi() {
+    if (topicReportBusy) return;
+    topicReportBusy = true;
     mount(holder, loader('ИИ разбирает тему…', ['Смотрю результаты попыток…', 'Анализирую ошибки…']));
     const single = {
       doneCount: (p.best || 0) >= Store.PASS ? 1 : 0,
@@ -1383,6 +1421,7 @@ Screens.topicReport = (params = {}) => {
     const store = course.topicReports || {};
     store[topic.id] = { ...data, demo };
     Store.updateCourse(course.id, { topicReports: store });
+    topicReportBusy = false;
     toast(demo ? 'Демо-разбор: подключи ключ ИИ' : 'Разбор готов', demo ? 'err' : 'ok');
     renderAi();
   }
@@ -1439,91 +1478,226 @@ Screens.topicReport = (params = {}) => {
    ========================================================================== */
 
 Screens.settings = () => {
-  const cfgHost = h('div.card', {}, loader('Проверяю настройки…', ['Читаю конфигурацию…']));
-  const statusHost = h('div');
+  const cfgHost = h('div.card', {}, loader('Читаю настройки…', ['Проверяю конфигурацию сервера…']));
 
   (async () => {
-    const cfg = await AI.getConfig(true);
-    const baseUrl = h('input.input', { value: cfg.baseUrl || '', placeholder: 'https://inference.dahl.global/v1' });
-    const model = h('input.input', { value: cfg.model || '', placeholder: 'deepseek-ai/DeepSeek-V4-Flash-0731' });
-    const key = h('input.input', { type: 'password', placeholder: cfg.keySet ? 'ключ сохранён — введи новый, чтобы заменить' : 'Bearer-ключ API', autocomplete: 'off' });
-    const result = h('div');
+    let cfg = await AI.getConfig(true).catch(() => ({}));
 
-    const save = async () => {
-      const body = { baseUrl: baseUrl.value, model: model.value };
-      if (key.value.trim()) body.apiKey = key.value.trim();
-      const res = await AI.saveConfig(body);
-      key.value = '';
-      if (res.warning) toast(res.warning, 'err');
-      else toast('Настройки сохранены', 'ok');
-      mount(result, h('div.chip-row', {},
-        h('span.chip' + (res.keySet ? '.green' : ''), res.keySet ? `ключ: ${res.keyHint}` : 'ключ не задан'),
-        res.keyFromEnv ? h('span.chip.blue', 'из переменных хостинга') : null,
-        h('span.chip.blue', res.model || ''),
-        h('span.chip', res.baseUrl || '')));
-      renderStatus(res);
-    };
+    let busy = false;
 
-    const test = async () => {
-      mount(result, h('div.inline', {}, h('div.spin.dark'), h('span.muted.small', 'Проверяю подключение к ИИ…')));
-      const res = await AI.ping();
-      renderStatus(res);
-    };
+    /* ---------------------------------------------------------- элементы */
 
-    function renderStatus(res) {
-      const ok = res && (res.ok === true || res.keySet);
-      if (res && res.ok === false) {
-        mount(result, h('div.explain.bad', {},
-          h('b', '❌ ИИ не ответил'),
-          h('div.small', res.error || 'неизвестная ошибка'),
-          h('div.tiny.muted', { style: { marginTop: '6px' } }, 'Проверь ключ, URL и название модели. Пока приложение работает в демо-режиме.')));
-      } else if (ok) {
-        mount(result, h('div.explain.ok', {},
-          h('b', '✅ Подключение работает'),
-          h('div.small', res.reply ? `Ответ модели: ${res.reply}` : 'Ключ сохранён. Теперь планы, объяснения и разборы ошибок будут приходить от ИИ.'),
-          res.ms ? h('div.tiny.muted', `время ответа: ${res.ms} мс`) : null));
+    const baseUrl = h('input.input', {
+      value: cfg.baseUrl || '',
+      placeholder: 'https://inference.dahl.global/v1',
+      autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false',
+      inputmode: 'url',
+    });
+    const model = h('input.input', {
+      value: cfg.model || '',
+      placeholder: 'deepseek-ai/DeepSeek-V4-Flash-0731',
+      autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false',
+    });
+
+    // Ключ: поле видимое (можно проверить, что вставилось), с кнопкой «показать».
+    const key = h('input.input', {
+      type: 'password',
+      placeholder: cfg.keySet ? 'ключ уже сохранён — вставь новый, чтобы заменить' : 'вставь ключ API (Ctrl+V)',
+      autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false',
+      style: { paddingRight: '96px' },
+    });
+    // Вставка «как есть» не должна превращаться в кашу из пробелов и переводов строк
+    key.addEventListener('paste', (e) => {
+      const text = (e.clipboardData || window.clipboardData)?.getData('text');
+      if (!text) return;
+      e.preventDefault();
+      key.value = text.trim();
+      key.dispatchEvent(new Event('input'));
+    });
+    key.addEventListener('input', () => {
+      // мягкая подсветка: если в ключе что-то не так — скажем сразу, а не после сохранения
+      const value = key.value.trim();
+      hint.textContent = value
+        ? (value.length < 12
+          ? `⚠️ Ключ короткий: ${value.length} символов — обычно их 40+. Проверь, что скопировал целиком.`
+          : `Готово к сохранению: ${value.length} символов, начинается на «${value.slice(0, 4)}…»`)
+        : defaultHint;
+      hint.style.color = value && value.length < 12 ? 'var(--orange)' : '';
+      syncButtons();
+    });
+
+    const eye = h('button.btn.sm.ghost', {
+      style: { position: 'absolute', right: '6px', top: '50%', transform: 'translateY(-50%)', minHeight: '34px' },
+      onClick: () => {
+        const hidden = key.type === 'password';
+        key.type = hidden ? 'text' : 'password';
+        eye.textContent = hidden ? '🙈 скрыть' : '👁 показать';
+      },
+    }, '👁 показать');
+    const keyWrap = h('div', { style: { position: 'relative' } }, key, eye);
+
+    const defaultHint = 'Ключ можно также задать переменной окружения AI_API_KEY — она имеет приоритет над полем.';
+    const hint = h('div.hint', defaultHint);
+
+    const status = h('div');
+
+    const saveBtn = h('button.btn', { onClick: () => saveAndTest() }, '💾 Сохранить и проверить');
+    const testBtn = h('button.btn.ghost', { onClick: () => runTest(), disabled: !cfg.keySet }, '⚡ Проверить подключение');
+    const clearBtn = cfg.keyFromEnv
+      ? h('button.btn.ghost', {
+        onClick: () => toast('Ключ задан переменной окружения AI_API_KEY. Убери её в настройках проекта на хостинге и сделай редеплой.', 'err'),
+      }, '🔒 Ключ из окружения')
+      : h('button.btn.ghost', {
+        onClick: async () => {
+          if (busy) return;
+          if (!await confirmDialog('Удалить ключ?', 'Приложение перейдёт в демо-режим: планы и объяснения станут шаблонными.', 'Удалить', true)) return;
+          setBusy(true, 'Удаляю ключ…');
+          await AI.saveConfig({ clear: true });
+          key.value = '';
+          setBusy(false);
+          toast('Ключ удалён — включён демо-режим');
+          App.refreshKeyPill();
+          renderScreen(await AI.getConfig(true).catch(() => ({})));
+        },
+      }, '🗑 Удалить ключ');
+
+    function syncButtons() {
+      saveBtn.disabled = busy;
+      testBtn.disabled = busy || !(cfg.keySet || key.value.trim());
+      clearBtn.disabled = busy;
+    }
+
+    function setBusy(value, text) {
+      busy = value;
+      syncButtons();
+      if (value) mount(status, h('div.inline', {}, h('div.spin.dark'), h('span.muted.small', text || 'Работаю…')));
+    }
+
+    /* -------------------------------------------------------- действия */
+
+    /** Одно нажатие: сохранить ключ и сразу проверить его ответом модели. */
+    async function saveAndTest() {
+      if (busy) return;
+      const pending = key.value.trim();
+      setBusy(true, pending ? 'Сохраняю ключ…' : 'Сохраняю настройки…');
+
+      const body = { baseUrl: baseUrl.value.trim(), model: model.value.trim() };
+      if (pending) body.apiKey = pending;
+
+      const saved = await AI.saveConfig(body);
+
+      if (saved.error) {
+        setBusy(false);
+        mount(status, h('div.explain.bad', {},
+          h('b', '❌ Не удалось сохранить'),
+          h('div.small', saved.error)));
+        return;                                    // ключ остаётся в поле — вводить заново не нужно
       }
-      if (AppShell.cfg && AppShell.cfg.fileStorage === false) {
-        mount(result, h('div.explain.bad', { style: { marginTop: '10px' } },
-          h('b', '⚠️ Файл настроек недоступен на запись'),
-          h('div.small', 'Похоже, файловая система только для чтения. На хостинге задайте AI_API_KEY, AI_BASE_URL и AI_MODEL в переменных окружения проекта.')));
-      }
-      if (AppShell.cfg && AppShell.cfg.proxy && AppShell.cfg.proxy.note) {
-        mount(result, h('div.tiny.muted', { style: { marginTop: '10px' } }, `Сеть: ${AppShell.cfg.proxy.note}`));
+
+      // Поле очищаем ТОЛЬКО после успешного сохранения, чтобы ключ не «пропадал» на глазах
+      if (pending) key.value = '';
+      hint.textContent = defaultHint;
+      hint.style.color = '';
+
+      (saved.keyWarnings || []).forEach((w) => toast(w, 'err'));
+      App.refreshKeyPill();
+
+      setBusy(true, 'Проверяю ключ запросом к модели…');
+      const ping = await AI.ping();
+      setBusy(false);
+
+      const next = await AI.getConfig(true).catch(() => saved);
+      renderStatus(next, ping);
+      if (ping && ping.ok) {
+        confetti(24);
+        toast('Подключение работает — ИИ отвечает', 'ok');
+      } else {
+        toast('Ключ сохранён, но подключиться не удалось', 'err');
       }
     }
 
-    mount(cfgHost,
-      h('h3', { style: { marginBottom: '6px' } }, '🔌 Подключение ИИ'),
-      h('p.muted.small', { style: { marginBottom: '14px' } },
-        'Ключ хранится ТОЛЬКО на сервере приложения (файл ', h('code', cfg.dataDir || 'data'), '/config.json) и не попадает в браузер. Все запросы идут через прокси /api/ai.'),
-      h('div.field', h('span.lbl', 'Base URL API'), baseUrl, h('div.hint', 'Адрес OpenAI-совместимого API. По умолчанию https://inference.dahl.global/v1')),
-      h('div.field', h('span.lbl', 'Модель'), model, h('div.hint', 'Например: deepseek-ai/DeepSeek-V4-Flash-0731')),
-      h('div.field', h('span.lbl', 'API-ключ'), key, h('div.hint', 'Ключ можно также задать переменной окружения AI_API_KEY — она имеет приоритет.')),
-      h('div.btn-row', {},
-        h('button.btn', { onClick: save }, 'Сохранить'),
-        h('button.btn.ghost', { onClick: test }, 'Проверить подключение'),
-        cfg.keyFromEnv
-          ? h('button.btn.ghost', {
-            onClick: () => toast('Ключ задан переменной окружения AI_API_KEY. Уберите её в настройках проекта на хостинге и сделайте редеплой.', 'err'),
-          }, 'Ключ из окружения')
-          : h('button.btn.ghost', {
-            onClick: async () => {
-              if (await confirmDialog('Удалить ключ?', 'Приложение перейдёт в демо-режим: планы и объяснения будут упрощёнными.', 'Удалить', true)) {
-                await AI.saveConfig({ clear: true });
-                toast('Ключ удалён');
-                App.render();
-              }
-            },
-          }, 'Удалить ключ')),
-      h('div', { style: { marginTop: '14px' } }, result));
+    async function runTest() {
+      if (busy) return;
+      setBusy(true, 'Отправляю тестовый запрос к модели…');
+      const ping = await AI.ping();
+      setBusy(false);
+      renderStatus(await AI.getConfig(true).catch(() => cfg), ping);
+      toast(ping && ping.ok ? `ИИ ответил: ${ping.reply || 'ok'} (${ping.ms} мс)` : 'ИИ не ответил — смотри подробности ниже',
+        ping && ping.ok ? 'ok' : 'err');
+    }
 
-    renderStatus(cfg);
+    /* ---------------------------------------------------------- вывод */
+
+    function renderStatus(config, ping) {
+      const blocks = [];
+
+      if (ping) {
+        if (ping.ok) {
+          blocks.push(h('div.explain.ok', {},
+            h('b', '✅ Подключение работает'),
+            h('div.small', `Модель ответила «${ping.reply || 'ok'}» за ${ping.ms} мс. Планы, объяснения и разборы ошибок будут приходить от ИИ.`)));
+        } else {
+          blocks.push(h('div.explain.bad', {},
+            h('b', `❌ ${ping.code === 'NO_KEY' ? 'Ключ не задан' : 'ИИ не ответил'}`),
+            h('div.small', String(ping.error || 'неизвестная ошибка').slice(0, 400)),
+            h('div.tiny.muted', { style: { marginTop: '6px' } },
+              'Что проверить: ключ скопирован целиком, Base URL заканчивается на /v1, название модели существует, на хостинге открыт доступ в интернет.')));
+        }
+      }
+
+      if (config && config.keySet) {
+        blocks.push(h('div.chip-row', { style: { marginTop: '10px' } },
+          h('span.chip.green', `🔑 ${config.keyHint}`),
+          config.keyFromEnv ? h('span.chip.blue', 'из переменных окружения AI_API_KEY') : null,
+          config.keySource === 'memory' ? h('span.chip.gold', 'ключ в памяти (до перезапуска)') : null,
+          config.keySource === 'file+memory' ? h('span.chip', 'сохранён в файл на сервере') : null,
+          h('span.chip.blue', `🧠 ${config.model}`),
+          h('span.chip', `🌐 ${config.baseUrl}`)));
+      } else {
+        blocks.push(h('div.explain', { style: { marginTop: '10px' } },
+          h('b', 'Сейчас демо-режим'),
+          h('div.small', 'План и объяснения генерируются шаблонно. Вставь ключ выше и нажми «Сохранить и проверить».')));
+      }
+
+      if (config && config.fileStorage === false) {
+        blocks.push(h('div.explain.bad', { style: { marginTop: '10px' } },
+          h('b', '⚠️ Ключ сохранился только в память'),
+          h('div.small', config.storageNote || 'Файловая система только для чтения: после перезапуска контейнера ключ нужно ввести снова. Надёжнее задать AI_API_KEY в переменных окружения проекта.')));
+      }
+
+      if (config && config.proxy && config.proxy.note) {
+        blocks.push(h('div.tiny.muted', { style: { marginTop: '10px' } }, `Сеть: ${config.proxy.note}`));
+      }
+
+      mount(status, ...blocks);
+    }
+
+    function renderScreen(config) {
+      cfg = config || cfg;
+      mount(cfgHost,
+        h('div.between', {},
+          h('h3', '🔌 Подключение ИИ'),
+          h('span.chip' + (cfg.keySet ? '.green' : ''), cfg.keySet ? 'ключ задан' : 'демо-режим')),
+        h('p.muted.small', { style: { marginBottom: '14px' } },
+          'Ключ хранится только на сервере приложения и не попадает в браузер: все запросы идут через прокси /api/ai.'),
+        h('div.field', h('span.lbl', 'API-ключ'), keyWrap, hint),
+        h('div.field', h('span.lbl', 'Base URL API'), baseUrl,
+          h('div.hint', 'Адрес OpenAI-совместимого API. По умолчанию https://inference.dahl.global/v1')),
+        h('div.field', h('span.lbl', 'Модель'), model,
+          h('div.hint', 'Например: deepseek-ai/DeepSeek-V4-Flash-0731')),
+        h('div.btn-row', {}, saveBtn, testBtn, clearBtn),
+        h('div', { style: { marginTop: '14px' } }, status));
+
+      renderStatus(cfg, null);
+      syncButtons();
+    }
+
+    renderScreen(cfg);
   })();
 
   const dataHost = h('div.card', {},
     h('h3', { style: { marginBottom: '10px' } }, '📦 Данные и прогресс'),
-    h('p.muted.small', 'Прогресс хранится локально в браузере (localStorage). Его можно выгрузить в файл или очистить.'),
+    h('p.muted.small', 'Прогресс и профиль хранятся локально в браузере (localStorage). Их можно выгрузить в файл или очистить.'),
     h('div.btn-row', { style: { marginTop: '12px' } },
       h('button.btn.sm.ghost', {
         onClick: () => {
@@ -1535,7 +1709,7 @@ Screens.settings = () => {
       }, '⬇️ Скачать прогресс (JSON)'),
       h('button.btn.sm.ghost', {
         onClick: async () => {
-          if (await confirmDialog('Сбросить прогресс?', 'Все курсы и результаты тестов будут удалены. Настройки ИИ останутся.', 'Сбросить', true)) {
+          if (await confirmDialog('Сбросить прогресс?', 'Все курсы, профиль и результаты тестов будут удалены. Настройки ИИ останутся.', 'Сбросить', true)) {
             localStorage.removeItem('duoai.state.v1');
             location.hash = '#/';
             location.reload();
@@ -1546,16 +1720,61 @@ Screens.settings = () => {
   return {
     title: 'Настройки',
     subtitle: 'Подключение API и данные',
-    node: h('div.stack', {}, statusHost, cfgHost, dataHost),
+    node: h('div.stack', {}, cfgHost, dataHost),
   };
 };
 
-/* ==========================================================================
-   Профиль
-   ========================================================================== */
+/** Модалка редактирования профиля: имя + аватар. */
+function editProfileDialog(reload) {
+  const me = Store.user();
+  const draft = { name: me.name || '', avatar: me.avatar || '🐸' };
+
+  const nameInput = h('input.input', {
+    value: draft.name,
+    placeholder: 'Как тебя называть? Например, Дима',
+    maxlength: '40',
+    autofocus: true,
+    onInput: (e) => { draft.name = e.target.value; },
+  });
+
+  const grid = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 62px), 1fr))', gap: '8px' } },
+    Store.AVATARS.map((emoji) => {
+      const btn = h('button.opt', {
+        style: { fontSize: '28px', textAlign: 'center', padding: '10px 0', minHeight: '60px', justifyContent: 'center' },
+        onClick: () => {
+          draft.avatar = emoji;
+          [...grid.children].forEach((c) => c.classList.remove('sel'));
+          btn.classList.add('sel');
+        },
+      }, emoji);
+      if (emoji === draft.avatar) btn.classList.add('sel');
+      return btn;
+    }));
+
+  modal({
+    title: '👤 Профиль',
+    body: h('div', {},
+      h('div.field', h('span.lbl', 'Имя'), nameInput,
+        h('div.hint', 'Имя увидят отчёты — ИИ-учитель будет обращаться к тебе по нему.')),
+      h('div.field', h('span.lbl', 'Аватар'), grid)),
+    actions: [
+      { label: 'Отмена', style: 'ghost' },
+      {
+        label: 'Сохранить',
+        onClick: (close) => {
+          Store.updateUser({ name: draft.name, avatar: draft.avatar });
+          close();
+          toast(`Сохранено. Привет, ${Store.userName()}!`, 'ok');
+          if (reload) reload();
+        },
+      },
+    ],
+  });
+}
 
 Screens.profile = () => {
   const st = Store.getState();
+  const me = Store.user();
   const xp = Store.totalXp();
   const lvl = Store.level(xp);
   const courses = Store.courses();
@@ -1565,45 +1784,87 @@ Screens.profile = () => {
 
   const achievements = [
     { icon: '🎓', title: 'Первый курс', got: courses.length > 0, hint: 'Создай первый курс с ИИ' },
+    { icon: '✏️', title: 'Профиль заполнен', got: Boolean(String(me.name || '').trim()), hint: 'Укажи имя и аватар' },
     { icon: '✅', title: 'Первая тема', got: doneTopics > 0, hint: 'Пройди тему на 70%+' },
     { icon: '🔥', title: '3 дня подряд', got: (st.streak.count || 0) >= 3, hint: 'Занимайся три дня подряд' },
     { icon: '⚡', title: '500 XP', got: xp >= 500, hint: 'Набери 500 XP' },
     { icon: '🏆', title: 'Курс целиком', got: courses.some((c) => Store.stats(c).allDone), hint: 'Пройди все темы одного курса' },
     { icon: '🧠', title: '10 тем', got: doneTopics >= 10, hint: 'Пройди 10 тем' },
+    { icon: '📊', title: '5 тестов', got: st.sessions >= 5, hint: 'Пройди 5 тестов' },
   ];
+  const gotCount = achievements.filter((a) => a.got).length;
 
-  const calendar = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(14, 1fr)', gap: '5px', marginTop: '12px' } },
-    days.map((d) => h('div', {
-      title: `${d.day}: ${d.xp} XP`,
-      style: {
-        aspectRatio: '1 / 1', borderRadius: '6px',
-        background: d.xp > 0 ? (d.xp > 80 ? '#58cc02' : d.xp > 30 ? '#3f8f12' : '#2d5c14') : '#22333a',
-      },
-    })));
+  const calendar = h('div.calendar', {
+    style: { display: 'grid', gridTemplateColumns: 'repeat(14, 1fr)', gap: '5px', marginTop: '12px' },
+  }, days.map((d) => h('div', {
+    title: `${d.day}: ${d.xp} XP`,
+    style: {
+      aspectRatio: '1 / 1', borderRadius: '6px',
+      background: d.xp > 0 ? (d.xp > 80 ? '#58cc02' : d.xp > 30 ? '#3f8f12' : '#2d5c14') : '#22333a',
+    },
+  })));
+
+  const since = me.createdAt ? fmtDate(me.createdAt).split(',')[0] : '—';
+
+  const hero = h('div.card', { style: { background: 'linear-gradient(160deg,#20343c,#16262c)' } },
+    h('div.inline', { style: { alignItems: 'center', gap: '16px' } },
+      h('button', {
+        title: 'Сменить аватар',
+        onClick: () => editProfileDialog(() => App.render()),
+        style: {
+          width: '84px', height: '84px', flex: '0 0 auto', fontSize: '46px', lineHeight: '1',
+          background: '#132128', border: '2px solid var(--line)', borderBottomWidth: '5px',
+          borderRadius: '24px', display: 'grid', placeItems: 'center', cursor: 'pointer',
+        },
+      }, me.avatar || '🐸'),
+      h('div', { style: { flex: '1 1 200px', minWidth: 0 } },
+        h('div', { style: { fontSize: '24px', fontWeight: '900' } }, Store.userName()),
+        h('div.muted.small', { style: { marginTop: '2px' } },
+          `${LEVEL_TITLES[Math.min(LEVEL_TITLES.length - 1, lvl - 1)]} · уровень ${lvl} · ${xp} XP`),
+        h('div.chip-row', { style: { marginTop: '10px' } },
+          h('span.chip.blue', `📚 ${courses.length} ${plural(courses.length, 'курс', 'курса', 'курсов')}`),
+          h('span.chip.green', `✅ ${doneTopics} ${plural(doneTopics, 'тема', 'темы', 'тем')}`),
+          h('span.chip.gold', `🏅 ${gotCount}/${achievements.length} достижений`),
+          h('span.chip', `📅 ученик с ${since}`))),
+      h('button.btn.sm.ghost', { onClick: () => editProfileDialog(() => App.render()) }, '✏️ Изменить')),
+    h('div', { style: { marginTop: '14px' } }, pbar(Store.levelProgress(xp), { thin: true })),
+    h('div.tiny.muted', { style: { marginTop: '6px' } },
+      `До ${lvl + 1} уровня: ${120 - (xp % 120)} XP`));
+
+  const statsGrid = h('div.grid.four', {},
+    statCard(`${st.streak.count || 0} 🔥`, 'Дней подряд', '#ff9600'),
+    statCard(`${st.sessions}`, 'Тестов пройдено', '#1cb0f6'),
+    statCard(`${doneTopics}/${totalTopics}`, 'Тем пройдено', '#58cc02'),
+    statCard(fmtMinutes(st.minutes), 'Времени в учёбе', '#ce82ff'));
 
   return {
     title: 'Профиль',
     subtitle: 'Твой прогресс и достижения',
+    actions: [h('button.btn.sm.ghost', { onClick: () => editProfileDialog(() => App.render()) }, '✏️ Изменить профиль')],
     node: h('div.stack', {},
-      h('div.grid.three', {},
-        h('div.card.center', {},
-          ring(Store.levelProgress(xp), { size: 120, stroke: 12, color: '#58cc02', label: `${lvl}` }),
-          h('h3', { style: { marginTop: '10px' } }, `${LEVEL_TITLES[Math.min(LEVEL_TITLES.length - 1, lvl - 1)]}`),
-          h('div.muted.small', `уровень ${lvl} · ${xp} XP всего`),
-          h('div', { style: { marginTop: '10px' } }, pbar(Store.levelProgress(xp), { thin: true }))),
+      hero,
+      statsGrid,
+      h('div.grid.two', {},
         h('div.card', {},
-          h('h3', { style: { marginBottom: '12px' } }, 'Статистика'),
-          h('div.grid.two', {},
-            statCard(`${st.streak.count || 0} 🔥`, 'дней подряд', '#ff9600'),
-            statCard(`${st.sessions}`, 'тестов пройдено', '#1cb0f6'),
-            statCard(`${doneTopics}/${totalTopics}`, 'тем пройдено', '#58cc02'),
-            statCard(fmtMinutes(st.minutes), 'времени в учёбе', '#ce82ff'))),
-        h('div.card', {},
-          h('h3', { style: { marginBottom: '10px' } }, 'Достижения'),
-          h('div.stack', {}, achievements.map((a) => h('div.inline', { style: { opacity: a.got ? 1 : .45 } },
+          h('div.between', h('h3', '🏅 Достижения'), h('span.tag', `${gotCount} из ${achievements.length}`)),
+          h('div.stack', { style: { marginTop: '12px' } }, achievements.map((a) => h('div.inline', { style: { opacity: a.got ? 1 : .5, alignItems: 'flex-start' } },
             h('span', { style: { fontSize: '22px' } }, a.got ? a.icon : '🔒'),
-            h('div', {}, h('div', { style: { fontWeight: '800', fontSize: '14px' } }, a.title),
-              h('div.tiny.muted', a.hint))))))),
+            h('div', { style: { minWidth: 0 } },
+              h('div', { style: { fontWeight: '800', fontSize: '14px' } }, a.title),
+              h('div.tiny.muted', a.hint)))))),
+        h('div.card', {},
+          h('h3', { style: { marginBottom: '10px' } }, '🎯 Цель обучения'),
+          h('div.stack', {},
+            h('div',
+              h('div.tiny.muted', 'Текущий фокус'),
+              h('div', { style: { fontWeight: '800' } }, (Store.active() && Store.active().topic) || 'курс пока не выбран')),
+            h('div',
+              h('div.tiny.muted', 'Что дальше'),
+              h('div', { style: { fontWeight: '800' } },
+                Store.active() ? ((Store.nextTopic(Store.active()) || {}).topic?.title || 'все темы пройдены') : 'создай первый курс')),
+            h('div.btn-row', { style: { marginTop: '6px' } },
+              h('button.btn.sm', { onClick: () => App.go('#/new') }, '➕ Новая тема'),
+              Store.active() ? h('button.btn.sm.ghost', { onClick: () => App.go(`#/report/${Store.active().id}`) }, '📊 Отчёт') : null)))),
       h('div.card', {},
         h('h3', { style: { marginBottom: '4px' } }, 'Активность за 4 недели'),
         h('div.tiny.muted', 'Чем зеленее клетка — тем больше XP за день.'),

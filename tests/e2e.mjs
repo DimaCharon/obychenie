@@ -219,14 +219,132 @@ try {
   check('профиль показывает уровни/достижения', (await page.locator('#app').innerText()).includes('Достижения'));
   await shot('11-profile', { full: true });
 
+  /* 9.1 профиль: имя и аватар редактируются и сохраняются */
+  await page.click('button:has-text("Изменить")');
+  await sleep(400);
+  await page.fill('#modal-host input.input', 'Тестовый Ученик');
+  await page.locator('#modal-host button.opt').nth(5).click();
+  await page.click('#modal-host button:has-text("Сохранить")');
+  await sleep(700);
+
+  const profileSaved = await page.evaluate(() => JSON.parse(localStorage['duoai.state.v1']).user);
+  check('имя ученика сохраняется в профиле', profileSaved.name === 'Тестовый Ученик', profileSaved.name);
+  check('аватар ученика сохраняется в профиле', Boolean(profileSaved.avatar) && profileSaved.avatar !== '🐸', profileSaved.avatar);
+  check('имя видно в оболочке приложения',
+    (await page.locator('.brand').innerText()).includes('Тестовый Ученик')
+    && (await page.locator('.rail').innerText()).includes('Тестовый Ученик'));
+  check('профиль показывает дату регистрации', /ученик с/i.test(await page.locator('#app').innerText()));
+  await shot('11b-profile-edited', { full: true });
+
+  /* 9.2 ключ: вставка чистится, одно нажатие = один запрос, кнопка не дублирует */
+  const apiCalls = [];
+  page.on('request', (r) => { if (r.url().includes('/api/')) apiCalls.push(`${r.method()} ${new URL(r.url()).pathname}`); });
+
+  await page.goto(`${base}/#/settings`, { waitUntil: 'networkidle' });
+  await sleep(1200);
+  check('кнопка сохранения и проверки одна', await page.locator('button:has-text("Сохранить и проверить")').count() === 1);
+
+  // вставка с пробелами и переводом строки должна обрезаться
+  await page.evaluate(() => {
+    const el = document.querySelector('input[type=password]');
+    const dt = new DataTransfer();
+    dt.setData('text', '  key-s-lishnimi-probelami\n ');
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await sleep(300);
+  check('вставленный ключ обрезается от пробелов',
+    (await page.locator('input[type=password]').inputValue()) === 'key-s-lishnimi-probelami');
+
+  apiCalls.length = 0;
+  await page.click('button:has-text("Сохранить и проверить")');
+  await sleep(2200);
+  const posts = apiCalls.filter((c) => c === 'POST /api/config').length;
+  const pings = apiCalls.filter((c) => c === 'POST /api/ping').length;
+  check('одно нажатие = один запрос сохранения и один запрос проверки',
+    posts === 1 && pings === 1, `config POST=${posts}, ping=${pings}`);
+  check('после сохранения показывается результат проверки',
+    /Подключение работает|ИИ не ответил|Ключ не задан/.test(await page.locator('#app').innerText()));
+  check('поле ключа очищается только после успешного сохранения',
+    (await page.locator('input[type=password]').inputValue()) === '');
+
+  // повторное нажатие «Проверить подключение» — ровно один запрос
+  apiCalls.length = 0;
+  await page.click('button:has-text("Проверить подключение")');
+  await sleep(2000);
+  check('повторная проверка подключения — тоже один запрос',
+    apiCalls.filter((c) => c === 'POST /api/ping').length === 1);
+
+  // двойной клик не должен отправлять два запроса
+  await page.goto(`${base}/#/settings`, { waitUntil: 'networkidle' });
+  await sleep(1100);
+  apiCalls.length = 0;
+  const saveBtn = page.locator('button:has-text("Сохранить и проверить")');
+  await saveBtn.click();
+  await saveBtn.click({ force: true });
+  await sleep(2200);
+  check('двойной клик не дублирует запросы',
+    apiCalls.filter((c) => c === 'POST /api/config').length === 1
+    && apiCalls.filter((c) => c === 'POST /api/ping').length === 1,
+    apiCalls.join(', '));
+
+  // ключ остался в настройках (не «пропал»)
+  const cfgAfter = await (await fetch(`${base}/api/config`)).json();
+  check('ключ остаётся сохранённым на сервере', cfgAfter.keySet === true, `источник: ${cfgAfter.keySource}`);
+
+  /* 9.3 вёрстка: нет наложения и горизонтального переполнения */
+  const overflow = await page.evaluate(`(() => {
+    const bad = [];
+    if (document.documentElement.scrollWidth > window.innerWidth + 1) bad.push('страница шире окна');
+    for (const c of document.querySelectorAll('.card, .grid, .path-section, .node-block')) {
+      const cr = c.getBoundingClientRect();
+      if (!cr.width) continue;
+      for (const ch of c.children) {
+        const r = ch.getBoundingClientRect();
+        if (r.width && (r.right - cr.right > 2 || cr.left - r.left > 2)) bad.push(c.className.split(' ')[0] + ' → ' + ch.className.split(' ')[0]);
+      }
+    }
+    return bad.slice(0, 5);
+  })()`);
+  check('вёрстка: карточки не наезжают друг на друга', overflow.length === 0, overflow.join('; '));
+
   /* 10. мобильная вёрстка */
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   mobile.on('pageerror', (e) => errors.push(`mobile: ${e.message}`));
+  mobile.on('console', (m) => { if (m.type() === 'error') errors.push(`mobile console: ${m.text()}`); });
   await mobile.goto(`${base}/#/course/${courseId}`, { waitUntil: 'networkidle' });
   await sleep(900);
   const bottomNavVisible = await mobile.locator('.bottom-nav').isVisible();
   check('на мобильном видна нижняя навигация', bottomNavVisible);
   await mobile.screenshot({ path: path.join(shotDir, '12-mobile.png') });
+
+  // ни один экран не должен «расползаться» по горизонтали на телефоне
+  const mobileOverflow = [];
+  for (const [w, h, tag] of [[390, 844, 'iphone'], [320, 700, 'small']]) {
+    await mobile.setViewportSize({ width: w, height: h });
+    for (const route of ['#/', '#/new?topic=Дроби', '#/reviews', '#/profile', '#/settings', `#/course/${courseId}`, `#/report/${courseId}`]) {
+      await mobile.goto(`${base}/${route}`, { waitUntil: 'networkidle' });
+      await sleep(600);
+      const wide = await mobile.evaluate(`(() => {
+        if (document.documentElement.scrollWidth <= window.innerWidth + 1) return null;
+        return document.documentElement.scrollWidth + ' > ' + window.innerWidth;
+      })()`);
+      if (wide) mobileOverflow.push(`${tag} ${route}: ${wide}`);
+    }
+  }
+  check('на телефоне (390 и 320 px) нет горизонтального переполнения',
+    mobileOverflow.length === 0, mobileOverflow.join('; '));
+  await mobile.setViewportSize({ width: 390, height: 844 });
+  await mobile.goto(`${base}/#/profile`, { waitUntil: 'networkidle' });
+  await sleep(700);
+  await mobile.screenshot({ path: path.join(shotDir, '13-mobile-profile.png'), full_page: true });
+
+  // кнопки на телефоне должны быть удобного размера для пальца
+  await mobile.goto(`${base}/#/course/${courseId}`, { waitUntil: 'networkidle' });
+  await sleep(800);
+  const tiny = await mobile.evaluate(`(() => [...document.querySelectorAll('button, .node-btn, a.btn')]
+    .filter((b) => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.height < 32; })
+    .map((b) => (b.textContent || '').trim().slice(0, 20)).slice(0, 5))()`);
+  check('на телефоне нет слишком мелких кнопок', tiny.length === 0, tiny.join(' | '));
 
   await browser.close();
 

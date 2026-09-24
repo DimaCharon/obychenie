@@ -54,10 +54,14 @@ const App = (() => {
   }
 
   function sidebar(page) {
+    const me = Store.user();
     return h('aside.sidebar', {},
       h('div.brand', {},
-        h('div.brand-mark', '🦉'),
-        h('div', {}, h('div.brand-name', 'Duo-AI'), h('div.tiny.muted', 'учись с ИИ-учителем'))),
+        h('div.brand-mark', me.avatar || '🦉'),
+        h('div', { style: { minWidth: 0 } },
+          h('div.brand-name', 'Duo-AI'),
+          h('div.tiny.muted', { style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
+            String(Store.userName())))),
       h('div', { id: 'key-pill-host' }, keyPill()),
       NAV.map((item) => navBtn(item, page)),
       h('div.sidebar-foot', {},
@@ -81,14 +85,23 @@ const App = (() => {
     const days = Store.lastDays(7);
     const maxXp = Math.max(10, ...days.map((d) => d.xp));
 
+    const me = Store.user();
     return h('aside.rail', {},
       h('div.card', {},
-        h('div.inline', { style: { alignItems: 'center', gap: '14px' } },
-          ring(Store.levelProgress(xp), { size: 76, stroke: 8, color: '#58cc02', label: `${lvl}` }),
-          h('div', {},
-            h('div', { style: { fontWeight: '900', fontSize: '17px' } }, `${xp} XP`),
+        h('div.inline', { style: { alignItems: 'center', gap: '12px' } },
+          h('button', {
+            title: 'Профиль',
+            onClick: () => go('#/profile'),
+            style: {
+              width: '54px', height: '54px', flex: '0 0 auto', fontSize: '30px', cursor: 'pointer',
+              background: '#132128', border: '2px solid var(--line)', borderRadius: '16px',
+              display: 'grid', placeItems: 'center',
+            },
+          }, me.avatar || '🐸'),
+          h('div', { style: { minWidth: 0 } },
+            h('div', { style: { fontWeight: '900', fontSize: '16px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, Store.userName()),
             h('div.tiny.muted', `уровень ${lvl} · ${LEVEL_TITLES[Math.min(LEVEL_TITLES.length - 1, lvl - 1)]}`),
-            h('div.tiny.muted', { style: { marginTop: '4px' } }, `🔥 ${st.streak.count || 0} ${plural(st.streak.count || 0, 'день', 'дня', 'дней')} подряд`))),
+            h('div.tiny.muted', { style: { marginTop: '2px' } }, `⚡ ${xp} XP · 🔥 ${st.streak.count || 0} ${plural(st.streak.count || 0, 'день', 'дня', 'дней')}`))),
         h('div', { style: { marginTop: '12px' } },
           xpBars(days, maxXp))),
 
@@ -198,7 +211,16 @@ const App = (() => {
     render();
   }
 
-  return { go, render, boot, parse, refreshShell: () => { AI.getConfig(true).then((cfg) => { AppShell.cfg = cfg; render(); }); } };
+  /** Обновить индикатор ключа в сайдбаре без полной перерисовки экрана. */
+  async function refreshKeyPill() {
+    try {
+      AppShell.cfg = await AI.getConfig(true);
+    } catch { /* оставляем прежнее значение */ }
+    const host = document.getElementById('key-pill-host');
+    if (host) mount(host, keyPill());
+  }
+
+  return { go, render, boot, parse, refreshKeyPill };
 })();
 
 const AppShell = { cfg: null };

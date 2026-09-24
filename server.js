@@ -122,7 +122,7 @@ setupProxy();
 
 /* ================================================================ настройки */
 
-let fileStorage = true;      // доступна ли запись config.json (на хостинге FS может быть read-only)
+let fileStorage = true;      // удалось ли записать config.json (на хостинге FS может быть read-only)
 
 function ensureDataDir() {
   try {
@@ -134,7 +134,14 @@ function ensureDataDir() {
   }
 }
 
-function readConfig() {
+/**
+ * Конфигурация живёт в памяти и (по возможности) дублируется в config.json.
+ * Если файловая система только для чтения, ключ всё равно продолжает работать
+ * до перезапуска контейнера — иначе сохранённый ключ «пропадал» бы на глазах.
+ */
+let memoryConfig = readConfigFromDisk();
+
+function readConfigFromDisk() {
   try {
     const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -143,7 +150,12 @@ function readConfig() {
   }
 }
 
+function readConfig() {
+  return memoryConfig;
+}
+
 function writeConfig(cfg) {
+  memoryConfig = cfg;
   if (!ensureDataDir()) return false;
   try {
     const tmp = `${CONFIG_FILE}.${process.pid}.tmp`;
@@ -153,9 +165,21 @@ function writeConfig(cfg) {
     return true;
   } catch (err) {
     fileStorage = false;
-    console.warn('[duo-ai] config не сохранён на диск:', err.message);
+    console.warn('[duo-ai] config не сохранён на диск (ключ остаётся в памяти до перезапуска):', err.message);
     return false;
   }
+}
+
+/** Ключ приходит из разных источников — нормализуем и объясняем проблемы. */
+function inspectKey(raw) {
+  const value = typeof raw === 'string' ? raw : '';
+  const trimmed = value.trim();
+  const warnings = [];
+  if (trimmed !== value) warnings.push('лишние пробелы и переводы строк по краям ключа убраны');
+  if (/\s/.test(trimmed)) warnings.push('в ключе есть пробелы внутри — проверь, что скопировал его целиком');
+  if (/[^\x21-\x7e]/.test(trimmed)) warnings.push('в ключе есть непечатаемые или нелатинские символы — вероятно, скопировался не весь текст');
+  if (trimmed.length < 12) warnings.push('ключ подозрительно короткий (меньше 12 символов)');
+  return { key: trimmed, warnings };
 }
 
 /** Проверяем на старте, можно ли вообще писать в каталог данных. */
@@ -324,7 +348,11 @@ function healthPayload() {
       baseUrl,
       model,
     },
-    storage: { dataDir: DATA_DIR, fileStorage },
+    storage: {
+      dataDir: DATA_DIR,
+      fileStorage,
+      keySource: ENV_API_KEY ? 'env' : (readConfig().apiKey ? (fileStorage ? 'file+memory' : 'memory') : 'none'),
+    },
     proxy: PROXY,
     now: new Date().toISOString(),
   };
@@ -352,6 +380,7 @@ async function handleApi(req, res, url) {
       model,
       dataDir: DATA_DIR,
       fileStorage,
+      keySource: keyFromEnv ? 'env' : (readConfig().apiKey ? (fileStorage ? 'file+memory' : 'memory') : 'none'),
       proxy: PROXY,
       savedAt,
     });
@@ -375,9 +404,11 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { ok: true, keySet: false, fileStorage: saved });
     }
 
+    let keyWarnings = [];
     if (typeof body.apiKey === 'string') {
-      const key = body.apiKey.trim();
-      if (key) cfg.apiKey = key;
+      const inspected = inspectKey(body.apiKey);
+      keyWarnings = inspected.warnings;
+      if (inspected.key) cfg.apiKey = inspected.key;
       else delete cfg.apiKey;
     }
     if (typeof body.baseUrl === 'string' && body.baseUrl.trim()) {
@@ -398,7 +429,12 @@ async function handleApi(req, res, url) {
       baseUrl,
       model,
       fileStorage: saved,
-      warning: saved ? null : 'Файловая система только для чтения: сохраните ключ переменной окружения AI_API_KEY.',
+      keyWarnings,
+      storageNote: saved
+        ? 'Ключ сохранён в файл на сервере'
+        : 'Ключ работает, но сохранён только в памяти: файловая система только для чтения. '
+          + 'Чтобы не потерять его после перезапуска, задайте AI_API_KEY в переменных проекта.',
+      warning: saved ? null : 'Файловая система только для чтения: ключ работает до перезапуска. Надёжнее задать AI_API_KEY в переменных окружения проекта.',
     });
   }
 
