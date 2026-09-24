@@ -149,6 +149,23 @@ if (fs.existsSync(serverPath)) {
   ok('маршруты бэкенда и правила окружения на месте');
 }
 
+/* ------------------------------------------- 6. контекст Docker-сборки */
+
+// Хостинг собирает образ из корня репозитория и учитывает .dockerignore.
+// Если источник из COPY отсутствует или вырезан — сборка падает уже на его стороне
+// («Docker не нашёл файл, указанный в COPY»), поэтому ловим это у себя.
+try {
+  const { checkDockerContext } = require('./docker-context-check.js');
+  const docker = checkDockerContext({ root: ROOT });
+  docker.errors.forEach(fail);
+  docker.warnings.forEach(ok);
+  if (!docker.errors.length && docker.checked) {
+    ok(`контекст Docker-сборки полный: ${docker.checked} источник(ов) COPY, ${docker.contextFiles} файлов в образе`);
+  }
+} catch (err) {
+  fail(`не удалось проверить контекст Docker-сборки: ${err.message}`);
+}
+
 /* --------------------------------------------------------------- итог */
 
 console.log('Duo-AI: проверка сборки');

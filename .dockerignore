@@ -1,3 +1,8 @@
+# Что НЕ попадает в образ: мусор, локальные данные и документация.
+# ВАЖНО: не добавляйте сюда файлы из COPY в Dockerfile (package.json, server.js,
+# public/, tools/) — сборка упадёт с ошибкой «Docker не нашёл файл, указанный в COPY».
+# Соответствие Dockerfile и этого файла проверяет npm run build (tools/docker-context-check.js).
+
 node_modules
 npm-debug.log*
 data
@@ -8,3 +13,13 @@ screenshots
 .env
 .env.*
 *.md
+
+# Страховка: перечисленные пути обязаны попасть в образ даже при правках выше.
+!package.json
+!package-lock.json
+!server.js
+!public
+!public/**
+!tools
+!tools/**
+!Dockerfile

@@ -24,6 +24,25 @@ import {
 } from './helpers.mjs';
 
 const require = createRequire(import.meta.url);
+const { checkDockerContext } = require(path.join(ROOT, 'tools/docker-context-check.js'));
+
+/** Копия проекта без node_modules/.git — как контекст сборки. */
+function copyProject(dest) {
+  const skip = new Set(['node_modules', '.git', 'data', 'screenshots', 'tests']);
+  (function copy(rel) {
+    const from = path.join(ROOT, rel);
+    for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+      if (skip.has(entry.name)) continue;
+      const child = rel ? path.join(rel, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        fs.mkdirSync(path.join(dest, child), { recursive: true });
+        copy(child);
+      } else {
+        fs.copyFileSync(path.join(ROOT, child), path.join(dest, child));
+      }
+    }
+  })('');
+}
 const running = [];
 async function startApp(env = {}, { port = null } = {}) {
   const dataDir = env.DATA_DIR || tempDataDir();
@@ -299,5 +318,48 @@ describe('служебные маршруты и статика', () => {
     const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
     const keepAlive = Number((src.match(/keepAliveTimeout\s*=\s*([\d_]+)/) || [])[1]?.replace(/_/g, ''));
     assert.ok(keepAlive >= 60000, `keepAliveTimeout должен быть ≥ 60с, сейчас ${keepAlive}`);
+  });
+
+  /* --- контекст Docker-сборки: ошибки «Docker не нашёл файл, указанный в COPY» --- */
+
+  test('Dockerfile и .dockerignore согласованы: все источники COPY попадают в образ', () => {
+    const r = checkDockerContext({ root: ROOT });
+    assert.deepEqual(r.errors, [], `контекст сборки неполный: ${r.errors.join('; ')}`);
+    assert.ok(r.checked >= 1, 'должен быть хотя бы один источник COPY (package.json)');
+  });
+
+  test('проверка контекста ловит файл, которого нет в репозитории', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'duoai-ctx-missing-'));
+    try {
+      copyProject(dir);
+      fs.appendFileSync(path.join(dir, 'Dockerfile'), '\nCOPY yarn.lock ./\n');
+      const r = checkDockerContext({ root: dir });
+      assert.ok(r.errors.some((e) => e.includes('yarn.lock')), `ожидали ошибку про yarn.lock, получено: ${r.errors.join('; ')}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('проверка контекста ловит файл, вырезанный .dockerignore', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'duoai-ctx-ignored-'));
+    try {
+      copyProject(dir);
+      fs.appendFileSync(path.join(dir, '.dockerignore'), '\npublic/index.html\n');
+      const r = checkDockerContext({ root: dir });
+      assert.ok(r.errors.some((e) => e.includes('public/index.html')),
+        `ожидали ошибку про исключённый public/index.html, получено: ${r.errors.join('; ')}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('Dockerfile не копирует файлы шаблонами (ломаются на «COPY file*»)', () => {
+    const dockerfile = fs.readFileSync(path.join(ROOT, 'Dockerfile'), 'utf8');
+    const copyLines = dockerfile.split(/\r?\n/).filter((l) => /^\s*COPY\b/i.test(l) && !/^\s*COPY\s+--from=/i.test(l));
+    copyLines.forEach((line) => {
+      assert.ok(!/[*?]/.test(line), `в COPY не должно быть шаблонов: ${line.trim()}`);
+    });
+    assert.ok(dockerfile.includes('EXPOSE 8080'), 'образ должен открывать порт 8080 (требование хостинга)');
+    assert.ok(/CMD\s*\[\s*"node",\s*"server\.js"\s*\]/.test(dockerfile), 'CMD должен запускать node server.js');
   });
 });

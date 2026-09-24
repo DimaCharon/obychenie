@@ -5,12 +5,15 @@ FROM node:20-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 
-# Сначала манифесты — слой зависимостей кэшируется
-COPY package.json package-lock.json* ./
+# Манифест зависимостей копируем без шаблонов: сборщики падают на «COPY file*»,
+# если шаблон не совпал ни с одним файлом в контексте (частая причина ошибки
+# «Docker не нашёл файл, указанный в COPY»).
+COPY package.json ./
 # undici нужен только для исходящих через прокси платформы и стоит в optionalDependencies,
 # поэтому сбой установки не должен ломать сборку.
 RUN npm install --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund --omit=optional
 
+# Остальное: server.js, public/, tools/, package-lock.json и прочие файлы проекта.
 COPY . .
 
 # Каталог для файла настроек (можно примонтировать томом)
