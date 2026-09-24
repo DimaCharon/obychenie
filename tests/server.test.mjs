@@ -14,6 +14,8 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import net from 'node:net';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -85,6 +87,39 @@ describe('хостинг RelaxDev: порт и переменные окруже
     const ai = await req(`${baseUrl}/api/ai`, { method: 'POST', body: JSON.stringify({ user: 'привет' }) });
     assert.equal(ai.status, 428);
     assert.equal(ai.json.code, 'NO_KEY');
+  });
+});
+
+describe('сборка и запуск (требования хостинга)', () => {
+  test('в package.json есть скрипты build и start, которые хостинг вызывает сам', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    assert.ok(pkg.scripts, 'нет раздела scripts');
+    assert.ok(pkg.scripts.build, 'платформа запускает `npm run build` — скрипт обязателен');
+    assert.ok(pkg.scripts.start, 'платформа запускает `npm start` — скрипт обязателен');
+    assert.match(pkg.scripts.start, /server\.js/, 'npm start должен запускать server.js');
+    assert.ok(pkg.scripts['test:e2e'], 'должен быть скрипт E2E-тестов');
+  });
+
+  test('npm run build проходит успешно (код возврата 0)', () => {
+    const res = spawnSync('npm', ['run', 'build'], { cwd: ROOT, encoding: 'utf8' });
+    assert.equal(res.status, 0, `сборка упала:\n${res.stdout}\n${res.stderr}`);
+    assert.match(res.stdout, /Сборка успешна/);
+  });
+
+  test('npm run build находит поломку (негативная проверка)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'duoai-broken-'));
+    // копируем проект без node_modules/.git, ломаем подключение скрипта
+    fs.cpSync(ROOT, dir, {
+      recursive: true,
+      filter: (src) => !/(node_modules|\.git|data|screenshots)$/.test(path.basename(src)),
+    });
+    const index = path.join(dir, 'public/index.html');
+    fs.writeFileSync(index, fs.readFileSync(index, 'utf8').replace(/<script src="js\/store\.js"><\/script>/, ''));
+
+    const res = spawnSync('npm', ['run', 'build'], { cwd: dir, encoding: 'utf8' });
+    assert.notEqual(res.status, 0, 'сборка должна падать при потерянном скрипте');
+    assert.match(`${res.stdout}${res.stderr}`, /подключает только|отсутств/i);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 
