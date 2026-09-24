@@ -176,7 +176,7 @@ npm i -D playwright && npx playwright install chromium
    | `.next/static/` | `COPY --from=builder /app/.next/static ./.next/static` |
 
    Проверено симуляцией двухстадийного шаблона: билдер → сборка → финальный образ → `node server.js`
-   отвечает на `/health`, `/`, `/css/styles.css`, `/api/js`, `/api/config`. Но правильный путь всё равно —
+   отвечает на `/health`, `/`, `/css/styles.css`, `/js/app.js`, `/api/config`. Но правильный путь всё равно —
    тип сборки **«Свой Dockerfile»**: образ остаётся чистым, без лишних каталогов.
 
 Локальная проверка контекста сборки без Docker:
