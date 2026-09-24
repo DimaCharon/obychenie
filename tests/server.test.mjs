@@ -373,6 +373,37 @@ describe('служебные маршруты и статика', () => {
     }
   });
 
+  test('сборка чужим шаблоном (усечённое окружение) не падает: нет Dockerfile — это не ошибка', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'duoai-partial-'));
+    try {
+      copyProject(dir);
+      fs.rmSync(path.join(dir, 'Dockerfile'), { force: true });          // шаблон хостинга Dockerfile не использует
+      const run = spawnSync(process.execPath, ['tools/build-check.js'], { cwd: dir, encoding: 'utf8' });
+      assert.equal(run.status, 0, `сборка не должна падать без Dockerfile: ${run.stdout} ${run.stderr}`);
+      assert.match(run.stdout, /Dockerfile в этом окружении отсутствует/);
+      assert.match(run.stdout, /Сборка успешна/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('стадия билдера чужого шаблона (только package.json) собирается без ошибок', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'duoai-builder-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'tools'), { recursive: true });
+      fs.copyFileSync(path.join(ROOT, 'package.json'), path.join(dir, 'package.json'));
+      fs.copyFileSync(path.join(ROOT, 'tools/build-check.js'), path.join(dir, 'tools/build-check.js'));
+      fs.copyFileSync(path.join(ROOT, 'tools/docker-context-check.js'), path.join(dir, 'tools/docker-context-check.js'));
+
+      const run = spawnSync(process.execPath, ['tools/build-check.js'], { cwd: dir, encoding: 'utf8' });
+      assert.equal(run.status, 0, `усечённая копия должна собираться с кодом 0: ${run.stdout} ${run.stderr}`);
+      assert.match(run.stdout, /усечённое окружение/);
+      assert.match(run.stdout, /замечания \(в усечённом окружении не считаются ошибкой\)|Сборка успешна/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('Dockerfile не копирует файлы шаблонами (ломаются на «COPY file*»)', () => {
     const dockerfile = fs.readFileSync(path.join(ROOT, 'Dockerfile'), 'utf8');
     const copyLines = dockerfile.split(/\r?\n/).filter((l) => /^\s*COPY\b/i.test(l) && !/^\s*COPY\s+--from=/i.test(l));

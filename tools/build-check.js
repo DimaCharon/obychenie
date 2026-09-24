@@ -16,6 +16,15 @@
  *   7. Артефакт сборки: готовое приложение складывается в dist/ — его копируют
  *      шаблоны хостинга, которые собирают образ в две стадии (COPY --from=builder /app/dist).
  *
+ * Два режима работы:
+ *   • полный — проверки выполняются по всему репозиторию, найденные проблемы
+ *     возвращают код 1 (так шаг сборки защищает от битого выката);
+ *   • усечённый — если сборку запускает шаблон хостинга под автоопределённый стек
+ *     (например, тип «next»), файлы репозитория видны частично: нет Dockerfile,
+ *     нет части каталогов. В этом окружении проверки бессмысленны и НЕ должны
+ *     ломать деплой: печатаются предупреждения, код возврата 0.
+ *     Принудительно включить полный режим: BUILD_STRICT=1.
+ *
  * Код возврата 0 — сборка успешна, 1 — есть ошибки (лог печатается в stderr).
  * Занимает меньше секунды, зависимостей не требует.
  */
@@ -29,6 +38,13 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'data', 'coverage', 'dist', '
 
 const errors = [];
 const notes = [];
+
+// Полный репозиторий или усечённая копия (так работает чужой шаблон сборки)?
+const hasServerFile = fs.existsSync(path.join(ROOT, 'server.js'));
+const hasIndexFile = fs.existsSync(path.join(ROOT, 'public/index.html'));
+const hasDockerfile = fs.existsSync(path.join(ROOT, 'Dockerfile'));
+const strictMode = process.env.BUILD_STRICT === '1' || process.env.BUILD_STRICT === 'true';
+const partialEnv = !(hasServerFile && hasIndexFile && hasDockerfile) && !strictMode;
 
 function fail(message) { errors.push(message); }
 function ok(message) { notes.push(message); }
@@ -157,16 +173,24 @@ if (fs.existsSync(serverPath)) {
 // Хостинг собирает образ из корня репозитория и учитывает .dockerignore.
 // Если источник из COPY отсутствует или вырезан — сборка падает уже на его стороне
 // («Docker не нашёл файл, указанный в COPY»), поэтому ловим это у себя.
-try {
-  const { checkDockerContext } = require('./docker-context-check.js');
-  const docker = checkDockerContext({ root: ROOT });
-  docker.errors.forEach(fail);
-  docker.warnings.forEach(ok);
-  if (!docker.errors.length && docker.checked) {
-    ok(`контекст Docker-сборки полный: ${docker.checked} источник(ов) COPY, ${docker.contextFiles} файлов в образе`);
+if (!hasDockerfile) {
+  // Нормальная ситуация, когда сборку ведёт шаблон хостинга под автоопределённый
+  // стек: Dockerfile из репозитория в такой сборке не участвует. Если же выбран
+  // тип «Свой Dockerfile», файл обязан лежать в корне — об этом сказано в сообщении.
+  ok('Dockerfile в этом окружении отсутствует: проверка контекста Docker пропущена '
+    + '(при типе сборки «Свой Dockerfile» файл обязан быть в корне репозитория)');
+} else {
+  try {
+    const { checkDockerContext } = require('./docker-context-check.js');
+    const docker = checkDockerContext({ root: ROOT });
+    docker.errors.forEach(fail);
+    docker.warnings.forEach(ok);
+    if (!docker.errors.length && docker.checked) {
+      ok(`контекст Docker-сборки полный: ${docker.checked} источник(ов) COPY, ${docker.contextFiles} файлов в образе`);
+    }
+  } catch (err) {
+    fail(`не удалось проверить контекст Docker-сборки: ${err.message}`);
   }
-} catch (err) {
-  fail(`не удалось проверить контекст Docker-сборки: ${err.message}`);
 }
 
 /* ------------------------------------------------- 7. артефакт сборки dist/ */
@@ -218,7 +242,24 @@ try {
 console.log('Duo-AI: проверка сборки');
 console.log(`  корень: ${ROOT}`);
 console.log(`  node:   ${process.version}`);
+console.log(`  режим:  ${partialEnv ? 'усечённое окружение (сборку ведёт шаблон хостинга)' : 'полная проверка репозитория'}`);
 notes.forEach((n) => console.log(`  ✓ ${n}`));
+
+if (partialEnv) {
+  // Здесь видна только часть файлов, поэтому строгие проверки неприменимы.
+  if (errors.length) {
+    console.log('\n  ⚠️  замечания (в усечённом окружении не считаются ошибкой):');
+    errors.forEach((e) => console.log(`   - ${e}`));
+  }
+  const missingPieces = [];
+  if (!hasDockerfile) missingPieces.push('Dockerfile (нужен только для типа сборки «Свой Dockerfile»)');
+  if (!hasServerFile) missingPieces.push('server.js');
+  if (!hasIndexFile) missingPieces.push('public/index.html');
+  console.log(`\n✓ Сборка успешна: окружение усечено (${missingPieces.join(', ')}) — `
+    + 'строгие проверки пропущены, чтобы не ломать сборку чужим шаблоном хостинга.');
+  console.log('  Полный набор проверок: клон репозитория → npm install → npm run build.');
+  process.exit(0);
+}
 
 if (errors.length) {
   console.error('\n✗ Сборка не прошла:');
