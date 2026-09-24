@@ -4,6 +4,8 @@
 # Соответствие Dockerfile и этого файла проверяет npm run build (tools/docker-context-check.js).
 
 node_modules
+.next
+dist
 npm-debug.log*
 data
 tests

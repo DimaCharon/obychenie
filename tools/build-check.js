@@ -233,6 +233,34 @@ try {
   const missing = needed.filter((rel) => !fs.existsSync(path.join(ROOT, rel)));
   missing.forEach((rel) => fail(`артефакт сборки неполный: нет ${rel}`));
   if (!missing.length) ok(`артефакт сборки dist/ создан: ${count} файлов`);
+
+  // Совместимость с шаблоном хостинга под другой стек (например, «next»): такой шаблон
+  // собирает образ в две стадии и копирует каталог standalone из Next.js:
+  //     COPY --from=builder /app/public ./public
+  //     COPY --from=builder /app/.next/standalone ./
+  //     COPY --from=builder /app/.next/static ./.next/static
+  //     CMD node server.js
+  // Если этих каталогов нет, Docker падает с «не нашёл файл, указанный в COPY».
+  // Кладём туда наш запускаемый сервер — тогда сборка проходит и приложение работает,
+  // даже если в настройках проекта оставлен тип сборки «next».
+  const NEXT_DIR = path.join(DIST, '..', '.next');
+  const standalone = path.join(NEXT_DIR, 'standalone');
+  fs.rmSync(NEXT_DIR, { recursive: true, force: true });
+  fs.mkdirSync(standalone, { recursive: true });
+  fs.cpSync(DIST, standalone, { recursive: true });
+  // .next/static — статика в том виде, в каком её копирует шаблон Next
+  fs.mkdirSync(path.join(NEXT_DIR, 'static'), { recursive: true });
+  ['css', 'js'].forEach((rel) => {
+    const from = path.join(ROOT, 'public', rel);
+    if (fs.existsSync(from)) fs.cpSync(from, path.join(NEXT_DIR, 'static', rel), { recursive: true });
+  });
+
+  const nextNeeded = ['.next/standalone/server.js', '.next/standalone/package.json', '.next/standalone/public/index.html', '.next/static'];
+  const nextMissing = nextNeeded.filter((rel) => !fs.existsSync(path.join(ROOT, rel)));
+  nextMissing.forEach((rel) => fail(`совместимость со сборкой «next»: нет ${rel}`));
+  if (!nextMissing.length) {
+    ok('совместимость с шаблоном «next»: .next/standalone и .next/static готовы (сервер запустится из standalone)');
+  }
 } catch (err) {
   fail(`не удалось собрать артефакт dist/: ${err.message}`);
 }

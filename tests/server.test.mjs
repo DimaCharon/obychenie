@@ -404,6 +404,58 @@ describe('служебные маршруты и статика', () => {
     }
   });
 
+  test('сборка под шаблон «next»: .next/standalone и .next/static на месте', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'duoai-next-'));
+    try {
+      copyProject(dir);
+      const run = spawnSync(process.execPath, ['tools/build-check.js'], { cwd: dir, encoding: 'utf8' });
+      assert.equal(run.status, 0, `сборка упала: ${run.stderr || run.stdout}`);
+
+      // Ровно те пути, которые копирует сгенерированный шаблон Next.js
+      ['public', '.next/standalone', '.next/static'].forEach((rel) => {
+        assert.ok(fs.existsSync(path.join(dir, rel)), `шаблон next ждёт ${rel} — его нет`);
+      });
+      ['.next/standalone/server.js', '.next/standalone/package.json', '.next/standalone/public/index.html',
+        '.next/static/css/styles.css'].forEach((rel) => {
+        assert.ok(fs.existsSync(path.join(dir, rel)), `в standalone нет ${rel}`);
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('образ, собранный шаблоном «next», запускается и отвечает', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'duoai-nextrun-'));
+    let child = null;
+    try {
+      copyProject(dir);
+      assert.equal(spawnSync(process.execPath, ['tools/build-check.js'], { cwd: dir, encoding: 'utf8' }).status, 0);
+
+      // Финальная стадия шаблона: public/, содержимое .next/standalone, .next/static
+      const app = path.join(dir, 'app');
+      fs.mkdirSync(path.join(app, '.next'), { recursive: true });
+      fs.cpSync(path.join(dir, 'public'), path.join(app, 'public'), { recursive: true });
+      fs.cpSync(path.join(dir, '.next/standalone'), app, { recursive: true });
+      fs.cpSync(path.join(dir, '.next/static'), path.join(app, '.next/static'), { recursive: true });
+
+      const port = await freePort(8620);
+      child = spawnNode('server.js', { env: { PORT: String(port), DATA_DIR: tempDataDir() }, cwd: app });
+      running.push(child);
+
+      const baseUrl = `http://127.0.0.1:${port}`;
+      const health = await waitForHealth(baseUrl);
+      assert.equal(health.ok, true, 'сервер из standalone должен подниматься');
+
+      const page = await req(`${baseUrl}/`);
+      assert.equal(page.status, 200, 'главная страница должна отдаваться');
+      const css = await req(`${baseUrl}/css/styles.css`);
+      assert.equal(css.status, 200, 'статика должна отдаваться');
+    } finally {
+      if (child) await child.stop();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('Dockerfile не копирует файлы шаблонами (ломаются на «COPY file*»)', () => {
     const dockerfile = fs.readFileSync(path.join(ROOT, 'Dockerfile'), 'utf8');
     const copyLines = dockerfile.split(/\r?\n/).filter((l) => /^\s*COPY\b/i.test(l) && !/^\s*COPY\s+--from=/i.test(l));
