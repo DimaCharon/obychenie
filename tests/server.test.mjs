@@ -28,7 +28,7 @@ const { checkDockerContext } = require(path.join(ROOT, 'tools/docker-context-che
 
 /** Копия проекта без node_modules/.git — как контекст сборки. */
 function copyProject(dest) {
-  const skip = new Set(['node_modules', '.git', 'data', 'screenshots', 'tests']);
+  const skip = new Set(['node_modules', '.git', 'data', 'screenshots', 'tests', 'dist']);
   (function copy(rel) {
     const from = path.join(ROOT, rel);
     for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
@@ -348,6 +348,26 @@ describe('служебные маршруты и статика', () => {
       const r = checkDockerContext({ root: dir });
       assert.ok(r.errors.some((e) => e.includes('public/index.html')),
         `ожидали ошибку про исключённый public/index.html, получено: ${r.errors.join('; ')}`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('npm run build создаёт запускаемый артефакт dist/ (его копируют шаблоны хостинга)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'duoai-dist-'));
+    try {
+      copyProject(dir);
+      const run = spawnSync(process.execPath, ['tools/build-check.js'], { cwd: dir, encoding: 'utf8' });
+      assert.equal(run.status, 0, `сборка упала: ${run.stderr || run.stdout}`);
+
+      ['dist/server.js', 'dist/package.json', 'dist/index.html', 'dist/css/styles.css', 'dist/js/app.js']
+        .forEach((rel) => {
+          assert.ok(fs.existsSync(path.join(dir, rel)), `в артефакте сборки нет ${rel}`);
+        });
+
+      // артефакт должен запускаться сам по себе
+      const src = fs.readFileSync(path.join(dir, 'dist/server.js'), 'utf8');
+      assert.ok(src.includes('http'), 'dist/server.js должен быть настоящим сервером, а не заглушкой');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

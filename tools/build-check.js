@@ -12,6 +12,9 @@
  *   4. Проверка фронтенда: index.html подключает все свои скрипты и css,
  *      а каждый файл из HTML существует.
  *   5. Ключевые маршруты бэкенда объявлены (чтобы не выкатить поломанный прокси).
+ *   6. Контекст Docker-сборки: пути из COPY есть в репозитории и не вырезаны .dockerignore.
+ *   7. Артефакт сборки: готовое приложение складывается в dist/ — его копируют
+ *      шаблоны хостинга, которые собирают образ в две стадии (COPY --from=builder /app/dist).
  *
  * Код возврата 0 — сборка успешна, 1 — есть ошибки (лог печатается в stderr).
  * Занимает меньше секунды, зависимостей не требует.
@@ -164,6 +167,50 @@ try {
   }
 } catch (err) {
   fail(`не удалось проверить контекст Docker-сборки: ${err.message}`);
+}
+
+/* ------------------------------------------------- 7. артефакт сборки dist/ */
+
+// Часть шаблонов хостинга собирает образ так: билд-стадия выполняет `npm run build`,
+// а финальная копирует каталог сборки (`COPY --from=builder /app/dist ./dist`).
+// Если такого каталога нет, Docker падает с «не нашёл файл, указанный в COPY».
+// Поэтому кладём в dist/ полностью запускаемое приложение и статику рядом с index.html.
+try {
+  const DIST = path.join(ROOT, 'dist');
+  fs.rmSync(DIST, { recursive: true, force: true });
+
+  const copyInto = (rel) => {
+    const from = path.join(ROOT, rel);
+    if (!fs.existsSync(from)) return;
+    fs.mkdirSync(path.dirname(path.join(DIST, rel)), { recursive: true });
+    fs.cpSync(from, path.join(DIST, rel), { recursive: true });
+  };
+
+  // Запускаемое приложение: server.js отдаёт public/ и проксирует ИИ
+  ['server.js', 'package.json', 'package-lock.json', 'public', 'tools'].forEach(copyInto);
+
+  // Статика верхним уровнем: dist/ можно отдать и как обычный статический сайт
+  ['index.html', 'css', 'js'].forEach((rel) => {
+    const from = path.join(ROOT, 'public', rel);
+    if (!fs.existsSync(from)) return;
+    fs.mkdirSync(DIST, { recursive: true });
+    fs.cpSync(from, path.join(DIST, rel), { recursive: true });
+  });
+
+  let count = 0;
+  (function walkDist(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) walkDist(path.join(dir, entry.name));
+      else count += 1;
+    }
+  })(DIST);
+
+  const needed = ['dist/server.js', 'dist/package.json', 'dist/index.html', 'dist/css/styles.css', 'dist/js/app.js'];
+  const missing = needed.filter((rel) => !fs.existsSync(path.join(ROOT, rel)));
+  missing.forEach((rel) => fail(`артефакт сборки неполный: нет ${rel}`));
+  if (!missing.length) ok(`артефакт сборки dist/ создан: ${count} файлов`);
+} catch (err) {
+  fail(`не удалось собрать артефакт dist/: ${err.message}`);
 }
 
 /* --------------------------------------------------------------- итог */
