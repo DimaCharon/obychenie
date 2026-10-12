@@ -160,6 +160,7 @@ const Store = (() => {
       progress: {},
       chat: {},
       bonus: null,
+      adaptive: Adaptive.blank(profile),   // уровень, сложность заданий, история
       xp: 0,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -251,7 +252,10 @@ const Store = (() => {
     return Object.values(state.xpByDay).reduce((a, b) => a + b, 0);
   }
 
-  /** Сохраняем результат теста темы. */
+  /** Адаптация конкретного курса (уровень → сложность заданий). */
+  function adaptive(course) { return Adaptive.ensure(course); }
+
+  /** Сохраняем результат теста темы + пересчитываем уровень и сложность заданий. */
   function saveResult(courseId, topicId, { score, correct, total, seconds, mistakes }) {
     const course = getCourse(courseId);
     if (!course) return null;
@@ -270,9 +274,19 @@ const Store = (() => {
     course.updatedAt = p.lastAt;
     state.sessions += 1;
     state.minutes += Math.max(1, Math.round((seconds || 0) / 60));
+
+    // Адаптация: уровень и сложность заданий пересчитываются по результату.
+    // Ошибки становятся «типичными» для промптов ИИ, если повторились дважды.
+    const errorTags = (mistakes || [])
+      .map((m) => String(m.q || '').slice(0, 60))
+      .filter(Boolean);
+    const adapt = Adaptive.record(Adaptive.ensure(course), {
+      score, seconds, questions: total || 1, topicId, errorTags,
+    });
+
     save();
     addXp(gained);
-    return { gained, passed };
+    return { gained, passed, adapt };
   }
 
   function addChat(courseId, topicId, msg) {
@@ -344,7 +358,7 @@ const Store = (() => {
     PASS, AVATARS,
     getState, courses, getCourse, active, createCourse, updateCourse, setActive, removeCourse,
     user, userName, updateUser, isNewUser,
-    path, topicById, nextTopic, stats, starsFor, saveResult, addChat, addXp, totalXp,
+    path, topicById, nextTopic, stats, starsFor, saveResult, addChat, addXp, totalXp, adaptive,
     level, levelProgress, lastDays, uid, save, normalizePlan, normalizeQuestion, today,
   };
 })();

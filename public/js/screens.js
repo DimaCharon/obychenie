@@ -39,8 +39,12 @@ async function aiInterview(topic, profile) {
 async function aiPlan(topic, profile, interview) {
   if (!AI.isConfigured()) { demoNotice({ code: 'NO_KEY' }); return { plan: Mock.plan(topic, profile), demo: true }; }
   try {
+    const level = Number(profile && profile.level) || 3;
+    const learner = `уровень ${level}/5 (${Adaptive.levelName(level)}), сложность заданий: `
+      + Adaptive.difficultyName(Adaptive.difficultyFor(level))
+      + (profile.style && profile.style.length ? `, предпочитает: ${profile.style.join(', ')}` : '');
     const raw = await AI.json({
-      system: Prompts.plan(topic, profile, interview),
+      system: Prompts.plan(topic, profile, interview, learner),
       user: `Составь персональный курс по теме «${topic}».`,
       temperature: 0.55, maxTokens: 12288,
     });
@@ -48,16 +52,21 @@ async function aiPlan(topic, profile, interview) {
   } catch (err) { demoNotice(err); return { plan: Mock.plan(topic, profile), demo: true }; }
 }
 
-async function aiTopicContent(course, topic) {
-  if (!AI.isConfigured()) return { demo: true, content: { theory: [], quiz: [] } };
+/** Материал темы: сложность берётся из уровня ученика (или задаётся вручную). */
+async function aiTopicContent(course, topic, difficultyOverride) {
+  const difficulty = difficultyOverride || Adaptive.difficultyFor(Adaptive.ensure(course).level);
+  if (!AI.isConfigured()) {
+    return { demo: true, difficulty, content: { theory: [], quiz: [] } };
+  }
   try {
     const raw = await AI.json({
-      system: Prompts.topic(course.topic, topic.title, course.profile),
-      user: `Сделай материал по теме «${topic.title}».`,
+      system: Prompts.topic(course.topic, topic.title, course.profile, Adaptive.text(course), difficulty),
+      user: `Сделай материал по теме «${topic.title}» сложности «${Adaptive.difficultyName(difficulty)}».`,
       temperature: 0.6, maxTokens: 3072,
     });
     return {
       demo: false,
+      difficulty,
       content: {
         theory: (Array.isArray(raw.theory) ? raw.theory : [])
           .map((b) => ({ h: String(b.h || b.title || 'Объяснение').slice(0, 90), body: String(b.body || '') }))
@@ -65,21 +74,66 @@ async function aiTopicContent(course, topic) {
         quiz: (Array.isArray(raw.quiz) ? raw.quiz : []).map((q) => Store.normalizeQuestion(q)).filter(Boolean),
       },
     };
-  } catch (err) { demoNotice(err); return { demo: true, content: { theory: [], quiz: [] } }; }
+  } catch (err) {
+    demoNotice(err);
+    return { demo: true, difficulty, content: { theory: [], quiz: [] } };
+  }
+}
+
+/** Экспресс-проверка уровня (3 вопроса) — уточняет самооценку из опроса. */
+async function aiDiagnose(topic, profile) {
+  if (!AI.isConfigured()) return { demo: true, data: Mock.diagnose(topic) };
+  try {
+    const data = await AI.json({
+      system: Prompts.diagnose(topic, profile),
+      user: `Дай 3 вопроса для проверки уровня по теме «${topic}».`,
+      temperature: 0.5, maxTokens: 1600,
+    });
+    data.quiz = (data.quiz || []).map((q) => Store.normalizeQuestion(q)).filter(Boolean);
+    if (data.quiz.length < 2) throw new Error('мало вопросов для проверки');
+    return { demo: false, data };
+  } catch (err) { demoNotice(err); return { demo: true, data: Mock.diagnose(topic) }; }
+}
+
+/** Большой анализ ученика: стиль учёбы, сильные/слабые стороны, что делать дальше. */
+async function aiAnalyze(course, stats) {
+  const m = Adaptive.metrics(course);
+  const payload = {
+    doneCount: stats.doneCount,
+    totalCount: stats.total,
+    avg: stats.avg,
+    attempts: m.attempts,
+    level: m.level,
+    startLevel: m.startLevel,
+    difficulty: m.difficulty,
+    pace: m.pace,
+    topics: (stats.topicStats || []).map((t) => ({ тема: t.title, статус: t.status, лучшийРезультат: t.best, попыток: t.attempts })),
+  };
+  if (!AI.isConfigured()) return { demo: true, data: Mock.analyze(payload) };
+  try {
+    const data = await AI.json({
+      system: Prompts.analyze(course.topic, course.profile, payload, Adaptive.text(course)),
+      user: 'Проанализируй, как я учусь, и скажи, что делать дальше.',
+      temperature: 0.55, maxTokens: 2048,
+    });
+    if (!data.summary) throw new Error('пустой анализ');
+    return { demo: false, data };
+  } catch (err) { demoNotice(err); return { demo: true, data: Mock.analyze(payload) }; }
 }
 
 async function aiExtra(course, topic, mistakes) {
-  if (!AI.isConfigured()) return { demo: true, data: Mock.extra(course.topic, topic.title) };
+  const difficulty = Adaptive.difficultyFor(Adaptive.ensure(course).level);
+  if (!AI.isConfigured()) return { demo: true, data: Mock.extra(course.topic, topic.title, difficulty) };
   try {
     const data = await AI.json({
-      system: Prompts.extra(course.topic, topic.title, mistakes, course.profile),
+      system: Prompts.extra(course.topic, topic.title, mistakes, course.profile, Adaptive.text(course)),
       user: 'Разбери ошибки и дай 3 новых вопроса.',
       temperature: 0.7, maxTokens: 2048,
     });
     data.quiz = (data.quiz || []).map((q) => Store.normalizeQuestion(q)).filter(Boolean);
     if (!data.quiz.length) throw new Error('нет вопросов в ответе');
     return { demo: false, data };
-  } catch (err) { demoNotice(err); return { demo: true, data: Mock.extra(course.topic, topic.title) }; }
+  } catch (err) { demoNotice(err); return { demo: true, data: Mock.extra(course.topic, topic.title, difficulty) }; }
 }
 
 async function aiBonus(course) {
@@ -109,7 +163,7 @@ async function aiReport(course, stats) {
   if (!AI.isConfigured()) return { demo: true, data: Mock.report(payload) };
   try {
     const data = await AI.json({
-      system: Prompts.report(course.topic, course.profile, payload),
+      system: Prompts.report(course.topic, course.profile, payload, Adaptive.text(course)),
       user: 'Составь отчёт об успеваемости.',
       temperature: 0.5, maxTokens: 2048,
     });
@@ -559,16 +613,37 @@ Screens.newCourse = (params = {}) => {
     }
 
     if (step === 3) {
-      const levelNote = ['', 'слышу впервые', 'что-то слышал(а)', 'немного разбираюсь', 'уверенно, но с пробелами', 'знаю хорошо, хочу углубить'];
+      const levelNote = Adaptive.LEVEL_NOTES;
       const known = h('textarea.textarea', { placeholder: 'Например: понимаю, что такое числитель и знаменатель, складываю дроби с одинаковыми знаменателями' }, profile.known);
       known.addEventListener('input', () => { profile.known = known.value; });
       const unknown = h('textarea.textarea', { placeholder: 'Например: не понимаю, зачем приводить к общему знаменателю, путаюсь при вычитании' }, profile.unknown);
       unknown.addEventListener('input', () => { profile.unknown = unknown.value; });
+
+      // От выбранного уровня зависит и объяснение, и сложность заданий в курсе
+      const chosenDiff = Adaptive.difficultyFor(profile.level);
+      const diffNote = h('div.explain', { style: { marginTop: '10px' } },
+        h('b', `Задания будут: ${Adaptive.difficultyName(chosenDiff)}`),
+        h('div.small', Adaptive.DIFF_DESC[chosenDiff]),
+        profile.levelFromTest
+          ? h('div.tiny.muted', { style: { marginTop: '6px' } },
+            `Уровень уточнён проверкой: ${Math.round((profile.diagnoseScore || 0) * 100)}% верных ответов — доверяю тесту, а не самооценке.`)
+          : null);
+
       mount(host,
         h('div.field', h('span.lbl', 'Как ты оцениваешь свои знания по теме?'),
+          h('div.hint', 'От этого зависят объяснения, примеры и сложность вопросов. Если сомневаешься — пройди короткую проверку ниже, и уровень определится по ответам.'),
           h('div.pill-row', [1, 2, 3, 4, 5].map((n) => h('button.pill' + (profile.level === n ? '.sel' : ''), {
-            onClick: () => { profile.level = n; renderStep(); },
+            onClick: () => { profile.level = n; profile.levelFromTest = false; renderStep(); },
           }, `${n} — ${levelNote[n]}`)))),
+        h('div.card.card-soft', {},
+          h('div.between', {},
+            h('div', { style: { minWidth: 0 } },
+              h('b', '🎯 Не уверен(а) в оценке?'),
+              h('div.muted.small', '3 вопроса — и я определю уровень по твоим ответам, а не по самооценке')),
+            h('button.btn.sm.blue', { onClick: () => checkLevel(host), disabled: busy }, 'Проверить уровень')),
+          profile.levelFromTest ? h('div.chip-row', { style: { marginTop: '10px' } },
+            h('span.chip.green', `уровень ${profile.level}/5 по тесту`)) : null),
+        diffNote,
         h('div.field', h('span.lbl', 'Что уже знаешь?'), known),
         h('div.field', h('span.lbl', 'Что именно не понятно?'), unknown),
         h('div.field', h('span.lbl', 'Цель (необязательно)'),
@@ -591,6 +666,33 @@ Screens.newCourse = (params = {}) => {
       step > 0 ? h('button.btn.ghost', { onClick: () => { step -= 1; renderStep(); } }, '← Назад') : h('span'),
       step < 4 ? h('button.btn', { onClick: next }, 'Далее →') : null));
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  /** Экспресс-проверка уровня: 3 вопроса от ИИ (или демо) → уровень по ответам. */
+  async function checkLevel(host) {
+    if (busy) return;
+    busy = true;
+    const body = h('div', {}, loader('Готовлю проверку уровня…', ['Смотрю тему…', 'Подбираю вопросы разной сложности…']));
+    const m = modal({ title: '🎯 Проверка уровня', wide: true, body, actions: [{ label: 'Закрыть', style: 'ghost' }] });
+    const { data, demo } = await aiDiagnose(profile.topic, profile);
+    busy = false;
+    const runner = h('div');
+    mount(body,
+      h('p.muted.small', 'Ответь на 3 вопроса — по ним я определю уровень и подберу сложность заданий.'),
+      demo ? h('div.hint', 'Демо-режим: подключи ключ ИИ, чтобы проверка была по твоей теме.') : null,
+      runner);
+    QuizRunner(runner, data.quiz || [], {
+      onFinish: (res) => {
+        const level = Adaptive.clampLevel(1 + Math.round(res.score * 4));
+        profile.level = level;
+        profile.levelFromTest = true;
+        profile.diagnoseScore = res.score;
+        profile.diagnoseAt = new Date().toISOString();
+        m.close();
+        toast(`Уровень по тесту: ${level}/5 — задания настрою на «${Adaptive.difficultyName(Adaptive.difficultyFor(level))}»`, 'ok');
+        renderStep();
+      },
+    });
   }
 
   function next() {
@@ -765,11 +867,18 @@ Screens.lesson = (params = {}) => {
   const counter = h('span.muted.small');
   const stage = h('div', { style: { marginTop: '18px' } });
 
+  const lvl = Adaptive.ensure(course);
+  const diffNow = Adaptive.difficultyFor(lvl.level);
+  const diffChip = h('span.chip.blue', {
+    title: `Уровень ${lvl.level}/5 — задания подобраны под него. Меняется автоматически по результатам тестов.`,
+  }, `🎚 ${Adaptive.difficultyName(diffNow)}`);
+
   const node = h('div', {},
     h('div.lesson-top',
       h('button.icon-btn', { title: 'Выйти', onClick: leave }, '✕'),
       bar,
       counter,
+      diffChip,
       h('button.btn.sm.purple', { onClick: () => chatModal(course, topic) }, '🤖 Спроси ИИ')),
     stage);
 
@@ -795,7 +904,9 @@ Screens.lesson = (params = {}) => {
 
     if (step.type === 'theory') {
       card = h('div.fade-in', {},
-        h('span.tag', 'ТЕОРИЯ'),
+        h('div.between', {},
+          h('span.tag', 'ТЕОРИЯ'),
+          h('span.chip', `под уровень ${lvl.level}/5`)),
         h('div.theory-card', { style: { marginTop: '10px' } },
           h('h4', step.block.h),
           h('p', step.block.body)));
@@ -896,11 +1007,21 @@ Screens.lesson = (params = {}) => {
     const score = correct / total;
 
     const before = (course.progress[topic.id] || {}).attempts || 0;
-    const { gained } = Store.saveResult(course.id, topic.id, {
+    const { gained, adapt } = Store.saveResult(course.id, topic.id, {
       score, correct, total, seconds, mistakes: state.mistakes,
     });
     const passed = score >= Store.PASS;
     if (passed) confetti(50);
+
+    const adaptCard = h('div.explain', {
+      style: { textAlign: 'left', marginTop: '16px', borderColor: adapt.direction === 'up' ? '#2e5a2a' : adapt.direction === 'down' ? '#5c2c30' : 'var(--line)' },
+    },
+    h('b', adapt.direction === 'up' ? '📈 ИИ-учитель подстраивается' : adapt.direction === 'down' ? '🪜 Подстраиваю сложность вниз' : '🎚 Уровень зафиксирован'),
+    h('div.small', adapt.message),
+    h('div.chip-row', { style: { marginTop: '8px' } },
+      h('span.chip.blue', `уровень ${adapt.levelBefore} → ${adapt.levelAfter} из 5`),
+      h('span.chip.gold', `сложность: ${Adaptive.difficultyName(adapt.difficultyAfter)}`),
+      adapt.pace ? h('span.chip', `темп: ${adapt.pace} с/вопрос`) : null));
 
     bar.firstChild.style.width = '100%';
     counter.textContent = 'готово';
@@ -922,8 +1043,13 @@ Screens.lesson = (params = {}) => {
             h('div.tiny', { style: { color: '#ffb3b3' } }, `твой ответ: ${m.chosen}`),
             h('div.tiny', { style: { color: '#b8f28a' } }, `верно: ${m.correct}`)))))
         : h('p.muted', { style: { marginTop: '14px' } }, 'Ни одной ошибки — отличная работа!'),
+      adaptCard,
       h('div.btn-row', { style: { marginTop: '22px', justifyContent: 'center' } },
         state.mistakes.length ? h('button.btn.purple', { onClick: workoutMistakes }, '🤖 Разобрать ошибки') : null,
+        passed && score >= 0.8
+          ? h('button.btn.blue', { onClick: () => adaptivePractice(course, topic, 'up') }, '🚀 Практика посложнее')
+          : null,
+        !passed ? h('button.btn.blue', { onClick: () => adaptivePractice(course, topic, 'down') }, '🪜 Задания полегче') : null,
         h('button.btn', { onClick: () => App.go(`#/course/${course.id}`) }, 'К карте курса'),
         h('button.btn.ghost', { onClick: () => App.go(`#/report/${course.id}/${topic.id}`) }, 'Отчёт по теме'),
         !passed ? h('button.btn.ghost', { onClick: reset }, 'Пройти снова') : null)));
@@ -933,6 +1059,58 @@ Screens.lesson = (params = {}) => {
   function reset() {
     state.index = 0; state.answers = {}; state.mistakes = []; state.finished = false; state.startedAt = Date.now();
     renderSteps();
+  }
+
+  let practiceBusy = false;
+
+  /**
+   * Дополнительная практика под уровень: 'up' — сложнее того, что сейчас,
+   * 'down' — проще, чтобы закрепить базу. Уровень и сложность обновляются по результату.
+   */
+  async function adaptivePractice(course, topic, direction) {
+    if (practiceBusy) return;
+    practiceBusy = true;
+    const a = Adaptive.ensure(course);
+    const base = Adaptive.difficultyFor(a.level);
+    const target = Math.min(3, Math.max(1, direction === 'up' ? base + 1 : base - 1));
+
+    const host = h('div', {}, loader('Подбираю задания под твой уровень…', [
+      'Смотрю твои результаты…', `Готовлю ${Adaptive.difficultyName(target)} уровень…`,
+    ]));
+    const m = modal({
+      title: `🎚 Задания: ${Adaptive.difficultyName(target)}`,
+      wide: true, body: host, actions: [{ label: 'Закрыть', style: 'ghost' }],
+    });
+
+    const { content, demo } = await aiTopicContent(course, topic, target);
+    practiceBusy = false;
+    const quiz = (content.quiz && content.quiz.length)
+      ? content.quiz
+      : Mock.topicContent(topic.title, target).quiz;
+
+    const runner = h('div');
+    mount(host,
+      h('p.muted.small', `${Adaptive.DIFF_DESC[target]}. Задания пересобираются автоматически — дальше сложность будет меняться по твоим результатам.`),
+      demo ? h('div.hint', 'Демо-режим: подключи ключ ИИ, чтобы задания приходили под твои ошибки.') : null,
+      runner);
+
+    QuizRunner(runner, quiz, {
+      onFinish: (res) => {
+        const adapt = Adaptive.record(Adaptive.ensure(course), {
+          score: res.score, seconds: res.seconds, questions: res.total || 1, topicId: topic.id,
+          errorTags: res.mistakes.map((x) => x.q),
+        });
+        Store.save();
+        if (res.score >= 0.7) { Store.addXp(15 + target * 5); confetti(30); }
+        toast(res.score >= 0.7
+          ? `Закреплено на «${Adaptive.difficultyName(target)}» — +${15 + target * 5} XP`
+          : 'Есть над чем поработать — разберём ошибки и попробуем снова',
+        res.score >= 0.7 ? 'ok' : 'err');
+        m.close();
+        App.go(`#/report/${course.id}/${topic.id}`);
+        return adapt;
+      },
+    });
   }
 
   let mistakesBusy = false;
@@ -972,12 +1150,10 @@ Screens.lesson = (params = {}) => {
     aiTopicContent(course, topic).then(({ content }) => {
       if (content.theory.length) topic.theory = content.theory;
       if (content.quiz.length) topic.quiz = content.quiz;
-      if (!(topic.theory || []).length) {
-        topic.theory = (Mock.plan(course.topic, course.profile).sections[0].topics[0].theory);
-      }
-      if (!(topic.quiz || []).length) {
-        topic.quiz = Mock.plan(course.topic, course.profile).sections[0].topics[0].quiz;
-      }
+      // Демо-режим: материал тоже собирается под сложность из уровня ученика
+      const demoContent = Mock.topicContent(topic.title, Adaptive.difficultyFor(Adaptive.ensure(course).level));
+      if (!(topic.theory || []).length) topic.theory = demoContent.theory;
+      if (!(topic.quiz || []).length) topic.quiz = demoContent.quiz;
       Store.updateCourse(course.id, { sections: course.sections });
       renderSteps();
     });
@@ -1033,6 +1209,7 @@ function chatModal(course, topic, prefill) {
             TEACHER_RULES,
             '',
             `Ученик: ${Prompts.profileText(course.profile)}.`,
+            `Как ученик учится: ${Adaptive.text(course)}.`,
             `Курс: «${course.title}». Текущая тема: «${topic.title}».`,
             topic.theory && topic.theory.length ? `Материал темы: ${topic.theory.map((b) => b.body).join(' ').slice(0, 1200)}` : '',
             'Отвечай коротко (до 130 слов), по делу, с конкретным примером. Если ученик просит проще — упрощай до бытового сравнения.',
@@ -1265,7 +1442,9 @@ Screens.report = (params = {}) => {
   let loadingReport = false;
 
   const renderReport = () => {
-    mount(holder, reportCard(course, stats, course.aiReport, getReport, () => loadingReport));
+    mount(holder,
+      reportCard(course, stats, course.aiReport, getReport, () => loadingReport),
+      adaptiveBlock(course));
   };
 
   async function getReport() {
@@ -1403,6 +1582,8 @@ Screens.topicReport = (params = {}) => {
   }
 
   let topicReportBusy = false;
+
+  const topicDiff = Adaptive.difficultyFor(Adaptive.ensure(course).level);
 
   async function getAi() {
     if (topicReportBusy) return;
@@ -1772,6 +1953,151 @@ function editProfileDialog(reload) {
   });
 }
 
+/* ==========================================================================
+   Блок адаптации в отчёте: как менялись уровень и сложность
+   ========================================================================== */
+
+function adaptiveBlock(course) {
+  const a = Adaptive.ensure(course);
+  const m = Adaptive.metrics(course);
+  const history = a.history.slice(-14);
+
+  const bars = h('div.inline', { style: { alignItems: 'flex-end', gap: '5px', height: '54px', marginTop: '8px' } },
+    history.length
+      ? history.map((x, i) => h('div', {
+        title: `Попытка ${i + 1}: ${Math.round(x.score * 100)}% · уровень ${x.level}/5 · ${Adaptive.difficultyName(x.difficulty)}`,
+        style: {
+          width: '14px', borderRadius: '4px',
+          height: `${Math.max(10, Math.round((x.score || 0.05) * 50))}px`,
+          background: x.score >= 0.7 ? '#58cc02' : '#ff9600',
+        },
+      }))
+      : h('span.muted.small', 'Тесты ещё не пройдены — как только пройдёшь, здесь появится история.'));
+
+  const round = (l) => (Number.isInteger(l) ? l : l.toFixed(1));
+
+  return h('div.card', {},
+    h('div.between', {},
+      h('h3', '🎚 Адаптация под ученика'),
+      h('span.tag', `сложность: ${Adaptive.difficultyName(m.difficulty)}`)),
+    h('p.muted.small', { style: { marginTop: '8px' } },
+      'Уровень и сложность заданий пересчитываются после каждого теста: высокий результат — задания сложнее, низкий — проще и с разбором.'),
+    h('div.chip-row', { style: { marginTop: '10px' } },
+      h('span.chip.blue', `уровень ${m.startLevel}/5 → ${m.level}/5`),
+      h('span.chip.gold', `заданий по уровню: ${m.difficulty}/3`),
+      h('span.chip.green', `точность ${m.avg}%`),
+      m.pace ? h('span.chip', `темп ${m.pace} с/вопрос`) : null,
+      h('span.chip', `попыток: ${m.attempts}`)),
+    history.length
+      ? h('div', {},
+        h('div.tiny.muted', { style: { marginTop: '12px' } }, 'КАК МЕНЯЛСЯ РЕЗУЛЬТАТ (последние попытки)'),
+        bars,
+        h('div.tiny.muted', { style: { marginTop: '6px' } },
+          `Первая попытка: уровень ${round(history[0].level)}/5 · последняя: ${round(history[history.length - 1].level)}/5`))
+      : null,
+    m.attempts ? null : h('div.chip-row', { style: { marginTop: '6px' } },
+      h('span.chip', 'задания подбираются автоматически уже сейчас — по самооценке из опроса')),
+    h('div.btn-row', { style: { marginTop: '14px' } },
+      h('button.btn.sm.blue', { onClick: () => App.go('#/profile') }, '🧠 Подробный анализ ученика')));
+}
+
+/* ==========================================================================
+   «Как я учусь» — анализ ученика (адаптация + ИИ)
+   ========================================================================== */
+
+function studyAnalysisCard(course, reload) {
+  if (!course) {
+    return h('div.card', {},
+      h('h3', '🧠 Как я учусь'),
+      h('div.muted.small', { style: { marginTop: '8px' } },
+        'Анализ появится после первого курса: он строится по ответам в опросе и результатам тестов.'));
+  }
+  const m = Adaptive.metrics(course);
+  const a = Adaptive.ensure(course);
+  const analysis = a.analysis || Adaptive.localAnalysis(course, Store.stats(course));
+  const weak = Adaptive.weakTopics(course);
+
+  const history = a.history.slice(-12);
+  const chart = h('div.inline', { style: { alignItems: 'flex-end', gap: '4px', height: '46px', marginTop: '6px' } },
+    history.length
+      ? history.map((x) => h('div', {
+        title: `${Math.round(x.score * 100)}% · уровень ${x.level}/5 · сложность ${Adaptive.difficultyName(x.difficulty)}`,
+        style: {
+          width: '16px', borderRadius: '4px',
+          height: `${Math.max(10, Math.round((x.level / Adaptive.MAX) * 44))}px`,
+          background: x.score >= 0.7 ? '#58cc02' : '#ff9600',
+        },
+      }))
+      : h('div.muted.small', 'Пока нет ни одного теста — пройди тему, и я начну подстраиваться.'));
+
+  const list = (title, items, color) => (items && items.length
+    ? h('div', { style: { minWidth: 0 } },
+      h('div.tiny.muted', { style: { letterSpacing: '1px', color } }, title),
+      h('ul.kp-list', {}, items.map((x) => h('li', {}, x))))
+    : null);
+
+  const busyBox = h('div');
+
+  return h('div.card', {},
+    h('div.between', {},
+      h('h3', '🧠 Как я учусь · анализ ученика'),
+      h('span.tag', analysis.demo ? 'демо-анализ' : 'анализ ИИ')),
+    h('div.chip-row', { style: { marginTop: '10px' } },
+      h('span.chip.blue', `уровень ${m.level}/5 (старт ${m.startLevel}/5)`),
+      h('span.chip.gold', `сложность: ${Adaptive.difficultyName(m.difficulty)}`),
+      h('span.chip.green', `точность ${m.avg}%`),
+      m.pace ? h('span.chip', `темп ${m.pace} с/вопрос`) : null,
+      m.attempts ? h('span.chip', `${m.attempts} ${plural(m.attempts, 'тест', 'теста', 'тестов')}`) : null,
+      m.attempts >= 2 ? h('span.chip', `тренд ${m.trend > 0 ? '+' : ''}${m.trend} п.п.`) : null),
+
+    h('div.small', { style: { marginTop: '12px', whiteSpace: 'pre-wrap' } }, analysis.summary || ''),
+    analysis.learningStyle
+      ? h('div.explain', { style: { marginTop: '10px' } },
+        h('b', 'Как мне лучше давать материал'),
+        h('div.small', analysis.learningStyle))
+      : null,
+
+    h('div.grid.two', { style: { marginTop: '14px' } },
+      list('СИЛЬНЫЕ СТОРОНЫ', analysis.strengths, 'var(--green)'),
+      list('ЧТО МЕШАЕТ', analysis.weaknesses, 'var(--orange)')),
+    analysis.patterns && analysis.patterns.length
+      ? h('div', { style: { marginTop: '12px' } }, list('НАБЛЮДЕНИЯ', analysis.patterns, 'var(--blue)'))
+      : null,
+    analysis.nextSteps && analysis.nextSteps.length
+      ? h('div', { style: { marginTop: '12px' } }, list('ЧТО ДЕЛАТЬ ДАЛЬШЕ', analysis.nextSteps, 'var(--purple)'))
+      : null,
+    analysis.difficultyAdvice
+      ? h('div.explain', { style: { marginTop: '12px' } },
+        h('b', '🎚 Сложность'), h('div.small', analysis.difficultyAdvice))
+      : null,
+
+    h('div', { style: { marginTop: '14px' } },
+      h('div.tiny.muted', 'УРОВЕНЬ ПО ПОПЫТКАМ'),
+      chart),
+    weak.length
+      ? h('div.chip-row', { style: { marginTop: '10px' } },
+        h('span.chip', 'повторить:'), weak.map((w) => h('span.chip.gold', `${w.title} · ${Math.round(w.best * 100)}%`)))
+      : null,
+    busyBox,
+    h('div.btn-row', { style: { marginTop: '14px' } },
+      h('button.btn.sm.blue', {
+        onClick: async (e) => {
+          const btn = e.target;
+          btn.disabled = true;
+          mount(busyBox, h('div.inline', { style: { marginTop: '10px' } }, h('div.spin.dark'), h('span.muted.small', 'Пересобираю анализ…')));
+          const { data, demo } = await aiAnalyze(course, Store.stats(course));
+          Store.updateCourse(course.id, { adaptive: { ...Adaptive.ensure(course), analysis: data, analysisAt: new Date().toISOString() } });
+          btn.disabled = false;
+          if (demo) toast('Демо-анализ: подключи ключ ИИ для подробного разбора', 'err');
+          else toast('Анализ обновлён', 'ok');
+          if (reload) reload();
+        },
+      }, '🔄 Обновить анализ'),
+      h('button.btn.sm.ghost', {
+        onClick: () => App.go(`#/report/${course.id}`),
+      }, '📊 Отчёт по курсу'))); 
+}
+
 Screens.profile = () => {
   const st = Store.getState();
   const me = Store.user();
@@ -1844,6 +2170,7 @@ Screens.profile = () => {
     node: h('div.stack', {},
       hero,
       statsGrid,
+      studyAnalysisCard(Store.active() || courses[0] || null, () => App.render()),
       h('div.grid.two', {},
         h('div.card', {},
           h('div.between', h('h3', '🏅 Достижения'), h('span.tag', `${gotCount} из ${achievements.length}`)),

@@ -137,7 +137,7 @@ describe('сборка и запуск (требования хостинга)',
 
     const res = spawnSync('npm', ['run', 'build'], { cwd: dir, encoding: 'utf8' });
     assert.notEqual(res.status, 0, 'сборка должна падать при потерянном скрипте');
-    assert.match(`${res.stdout}${res.stderr}`, /подключает только|отсутств/i);
+    assert.match(`${res.stdout}${res.stderr}`, /не подключает|подключает только|отсутств/i);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

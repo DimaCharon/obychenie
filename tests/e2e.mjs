@@ -95,14 +95,46 @@ try {
     parser[0] === '{"a":1}' && parser[1] === '{"a":1}' && parser[2] === '{"a":1}' && parser[4] === null,
     parser.join(' | '));
 
-  /* 3. мастер: тема */
+  /* 3. мастер: тема, профиль, уровень знаний (адаптация) */
   await page.fill('#app .card input.input', 'Проценты и скидки');
   await page.click('button:has-text("Составить план")');
   await sleep(500);
-  for (let i = 0; i < 4; i += 1) {
+  for (let i = 0; i < 3; i += 1) {
     await page.click('button:has-text("Далее →")');
     await sleep(220);
   }
+
+  // шаг «Твои знания»: уровень из опроса + превью сложности заданий
+  const step3Text = await page.locator('#app').innerText();
+  check('в опросе есть уровень знаний и превью сложности заданий',
+    /Как ты оцениваешь свои знания/.test(step3Text) && /Задания будут:/.test(step3Text),
+    (step3Text.match(/Задания будут: [^\n]*/) || [''])[0]);
+
+  await page.click('button.pill:has-text("2 — что-то слышал(а)")');
+  await sleep(300);
+  check('сложность заданий пересчитывается от выбранного уровня',
+    /Задания будут: базовый/.test(await page.locator('#app').innerText()));
+
+  // экспресс-проверка уровня: 3 вопроса, уровень считается по ответам
+  await page.click('button:has-text("Проверить уровень")');
+  await sleep(1500);
+  check('проверка уровня открылась', await page.locator('#modal-host .q-card').count() >= 1);
+  for (let i = 0; i < 4; i += 1) {
+    const answers = page.locator('#modal-host .answer');
+    if (!(await answers.count())) break;
+    await answers.nth(0).click();
+    await sleep(250);
+    await page.locator('#modal-host button:has-text("Дальше"), #modal-host button:has-text("Показать результат")').last().click();
+    await sleep(350);
+  }
+  await sleep(800);
+  check('модалка проверки уровня закрылась', await page.locator('#modal-host').isHidden());
+  const wizardStep3 = await page.locator('#app').innerText();
+  check('уровень подтверждён тестом и показан в опросе',
+    /уровень \d\/5 по тесту/.test(wizardStep3), (wizardStep3.match(/уровень \d\/5 по тесту/) || [''])[0]);
+
+  await page.click('button:has-text("Далее →")');
+  await sleep(300);
   await shot('02-wizard');
 
   /* 4. уточняющие вопросы от ИИ */
@@ -135,9 +167,19 @@ try {
   const lockedHint = await page.locator('button:has-text("Откроется дальше")').count();
   check('последующие темы закрыты (как в Duolingo)', lockedHint >= 8, `замков: ${lockedHint}`);
 
+  const adaptiveState = await page.evaluate(() => {
+    const s2 = JSON.parse(localStorage['duoai.state.v1']);
+    return s2.courses[s2.activeCourseId].adaptive;
+  });
+  check('в курсе есть модель ученика (уровень и сложность заданий)',
+    Boolean(adaptiveState && typeof adaptiveState.level === 'number'),
+    adaptiveState ? `уровень ${adaptiveState.level}/5` : 'нет');
+
   await page.click('button:has-text("Начать урок")');
   await sleep(700);
   check('первый шаг урока — теория', await page.locator('.theory-card').count() > 0);
+  check('в уроке видна сложность заданий под уровень ученика',
+    /базовый|средний|продвинутый/.test(await page.locator('#app').innerText()));
   await shot('05-lesson');
 
   for (let i = 0; i < 12; i += 1) {
@@ -163,10 +205,16 @@ try {
   const progress = await page.evaluate(() => {
     const s = JSON.parse(localStorage['duoai.state.v1']);
     const c = s.courses[s.activeCourseId];
-    return { xp: s.xpByDay, attempts: c.progress };
+    return { xp: s.xpByDay, attempts: c.progress, adaptive: c.adaptive };
   });
   check('прогресс сохранён и начислен XP',
     Object.keys(progress.attempts).length >= 1 && Object.values(progress.xp).some((v) => v > 0));
+
+  check('ИИ пересчитал уровень ученика после теста',
+    progress.adaptive && progress.adaptive.attempts >= 1 && progress.adaptive.history.length >= 1,
+    progress.adaptive ? `уровень ${progress.adaptive.level}/5, попыток ${progress.adaptive.attempts}` : 'нет данных');
+  check('после теста показано, как подстроилась сложность',
+    /ИИ-учитель подстраивается|Подстраиваю сложность|Уровень зафиксирован/.test(await page.locator('#app').innerText()));
 
   /* 7. чат с ИИ-учителем (кнопка «Спроси ИИ» внутри урока) */
   await page.goto(`${base}/#/lesson/${courseId}/t1`, { waitUntil: 'networkidle' });
@@ -200,6 +248,11 @@ try {
       && Array.isArray(aiReport?.weak) && aiReport.weak.length >= 1);
   await shot('08-report', { full: true });
 
+  check('в отчёте есть блок адаптации под ученика',
+    /Адаптация под ученика/.test(await page.locator('#app').innerText())
+    && /уровень \d\/5 →/.test(await page.locator('#app').innerText()));
+  await shot('08b-adaptive', { full: true });
+
   await page.locator('table.table tbody tr').first().click();
   await sleep(900);
   await page.click('button:has-text("Получить разбор")');
@@ -217,6 +270,13 @@ try {
   await page.goto(`${base}/#/profile`, { waitUntil: 'networkidle' });
   await sleep(900);
   check('профиль показывает уровни/достижения', (await page.locator('#app').innerText()).includes('Достижения'));
+
+  const profileText = await page.locator('#app').innerText();
+  check('в профиле есть анализ ученика («Как я учусь»)',
+    /Как я учусь/.test(profileText) && /уровень \d/.test(profileText));
+  check('анализ описывает сильные стороны, слабые места и следующие шаги',
+    /СИЛЬНЫЕ СТОРОНЫ/.test(profileText) && /ЧТО МЕШАЕТ/.test(profileText) && /ЧТО ДЕЛАТЬ ДАЛЬШЕ/.test(profileText));
+  check('в анализе есть совет по сложности заданий', /Сложность/.test(profileText));
   await shot('11-profile', { full: true });
 
   /* 9.1 профиль: имя и аватар редактируются и сохраняются */

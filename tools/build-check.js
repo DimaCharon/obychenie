@@ -91,6 +91,7 @@ const requiredFiles = [
   'public/index.html',
   'public/css/styles.css',
   'public/js/ai.js',
+  'public/js/adaptive.js',
   'public/js/app.js',
   'public/js/screens.js',
   'public/js/store.js',
@@ -138,15 +139,28 @@ if (fs.existsSync(indexPath)) {
   });
 
   const jsRefs = refs.filter((r) => r.endsWith('.js'));
-  if (jsRefs.length < 5) fail(`index.html подключает только ${jsRefs.length} скриптов — похоже, часть потерялась`);
-  ok(`index.html: ${refs.length} подключений, все файлы на месте`);
-
-  // порядок подключения важен: ui.js использует h(), screens.js использует Store/Prompts
   const order = jsRefs.map((r) => path.basename(r));
   const idx = (name) => order.indexOf(name);
-  if (idx('ui.js') > idx('screens.js')) fail('порядок скриптов нарушен: ui.js должен подключаться до screens.js');
-  if (idx('store.js') > idx('screens.js')) fail('порядок скриптов нарушен: store.js должен подключаться до screens.js');
-  if (idx('ai.js') > idx('screens.js')) fail('порядок скриптов нарушен: ai.js должен подключаться до screens.js');
+
+  // Точная проверка: каждый свой скрипт обязан быть подключён (по списку файлов в public/js),
+  // поэтому потеря любого из них ломает сборку, а не «проходит по количеству».
+  const jsDir = path.join(ROOT, 'public/js');
+  const ownScripts = fs.existsSync(jsDir)
+    ? fs.readdirSync(jsDir).filter((f) => f.endsWith('.js'))
+    : [];
+  const notLinked = ownScripts.filter((f) => !order.includes(f));
+  if (notLinked.length) fail(`index.html не подключает скрипты: ${notLinked.join(', ')} — похоже, часть потерялась при правке`);
+
+  if (!refs.some((r) => r.endsWith('.css'))) fail('index.html не подключает css/styles.css');
+  ok(`index.html: ${refs.length} подключений (${ownScripts.length} скриптов + css), все файлы на месте`);
+
+  // порядок подключения важен: ui.js даёт h(), store.js — Adaptive, ai.js — Prompts
+  const mustBeBefore = { 'ui.js': 'screens.js', 'store.js': 'screens.js', 'ai.js': 'screens.js', 'adaptive.js': 'store.js', 'store.js': 'app.js' };
+  Object.entries(mustBeBefore).forEach(([before, after]) => {
+    if (idx(before) >= 0 && idx(after) >= 0 && idx(before) > idx(after)) {
+      fail(`порядок скриптов нарушен: ${before} должен подключаться до ${after}`);
+    }
+  });
 }
 
 /* --------------------------------------------------- 5. маршруты бэкенда */
